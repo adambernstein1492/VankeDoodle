@@ -1,0 +1,29 @@
+# --- Never publish these -------------------------------------------------
+# Saved cases contain patient data. Keep them off GitHub.
+cases.jsonl
+*.jsonl
+
+# Downloaded journal articles are copyrighted and must not be redistributed.
+articles/
+*_text.txt
+
+# The grant document is not public.
+grant_text.txt
+*.docx
+
+# --- Python --------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# --- Working files -------------------------------------------------------
+*.npy
+nomogram_check.csv
+sampling_time_results.csv
+.streamlit/secrets.toml
+.DS_Store

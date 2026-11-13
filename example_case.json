@@ -1,0 +1,44 @@
+{
+  "schema_version": "1.0",
+  "case_id": "example-001",
+  "patient": {
+    "weight_kg": 23.0,
+    "age_years": 7.0,
+    "height_cm": 122.0,
+    "sex": "M",
+    "scr_mg_dl": 0.33
+  },
+  "regimen": {
+    "dose_mg": 450,
+    "interval_h": 8,
+    "n_doses": 5,
+    "infusion_h": 1.0,
+    "start": "2026-03-02 08:00"
+  },
+  "levels": [
+    {
+      "time": "2026-03-03 07:30",
+      "conc_mg_l": 6.2
+    },
+    {
+      "time": "2026-03-03 10:00",
+      "conc_mg_l": 30.2
+    },
+    {
+      "time": "2026-03-03 15:30",
+      "conc_mg_l": 8.3
+    }
+  ],
+  "options": {
+    "model": "all",
+    "target_auc24": 500,
+    "target_low": 400,
+    "target_high": 600,
+    "series": true,
+    "candidate_regimen": {
+      "dose_mg": 525,
+      "interval_h": 8,
+      "infusion_h": 1.0
+    }
+  }
+}
