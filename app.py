@@ -20,9 +20,12 @@ st.set_page_config(page_title="VankeDoodle", layout="wide")
 
 CASE_FILE = "cases.jsonl"
 
-# The fields start filled in with a plausible case so the page shows something
-# useful on first run. Overwrite them with your own.
-DEFAULT_LEVELS = pd.DataFrame({"time": [23.5, 26.0, 31.5],
+# Measured levels start EMPTY. Pre-filling them is unsafe: example concentrations
+# left behind after a user edits the dose produce a confident-looking fit of a
+# patient who does not exist. The example case is loaded only on request.
+EMPTY_LEVELS = pd.DataFrame({"time": pd.Series(dtype="float64"),
+                             "conc_mg_l": pd.Series(dtype="float64")})
+EXAMPLE_LEVELS = pd.DataFrame({"time": [23.5, 26.0, 31.5],
                                "conc_mg_l": [6.2, 30.2, 8.3]})
 
 
@@ -117,7 +120,8 @@ with left:
 
     if entry == "Regular schedule":
         c1, c2 = st.columns(2)
-        dose_mg = c1.number_input("Dose (mg)", min_value=1.0, value=450.0, step=25.0)
+        dose_mg = c1.number_input("Dose (mg)", min_value=1.0, value=450.0, step=25.0,
+                                  key="dose_mg_input")
         interval_h = c2.number_input("Interval (h)", min_value=1.0, max_value=72.0,
                                      value=8.0, step=1.0)
         c3, c4 = st.columns(2)
@@ -149,15 +153,23 @@ with left:
 
 with right:
     st.subheader("Levels drawn")
+    if "level_rev" not in st.session_state:
+        st.session_state.level_rev = 0
+        st.session_state.levels_df = EMPTY_LEVELS
+    if st.button("Load the example case (three levels on 450 mg q8h)"):
+        st.session_state.levels_df = EXAMPLE_LEVELS.copy()
+        st.session_state.level_rev += 1
     levels_df = st.data_editor(
-        DEFAULT_LEVELS, num_rows="dynamic", width='stretch', key="level_table",
+        st.session_state.levels_df, num_rows="dynamic", width='stretch',
+        key=f"level_table_{st.session_state.level_rev}",
         column_config={
             "time": st.column_config.NumberColumn(
                 "Time (h after first dose)", step=0.25),
             "conc_mg_l": st.column_config.NumberColumn("Measured (mg/L)", step=0.1)})
     st.caption("One level is enough for the Bayesian fit, and it need not be at "
                "steady state. Two within one interval also enable the Sawchuk-Zaske "
-               "calculation.")
+               "calculation. Levels must belong to the doses entered on the left - "
+               "if you change the dose, change these too.")
 
     st.subheader("Try a specific regimen")
     c1, c2 = st.columns(2)
@@ -203,6 +215,18 @@ if entry is None or not entry.get("ok"):
 
 current, rec = entry["current"], entry["recommendation"]
 ci = current.get("auc24_ci") or [None, None]
+
+given = response["regimen_given"]
+if response["levels"]:
+    st.caption(
+        f"Fitting {len(response['levels'])} measured level(s) against "
+        f"{given['n_doses']} dose(s) of {given['last_dose_mg']:.0f} mg every "
+        f"{given['observed_interval_h']:.0f} h "
+        f"({given['total_daily_dose_mg']:.0f} mg/day).")
+else:
+    st.caption(f"No levels entered - this is the population prediction for "
+               f"{given['last_dose_mg']:.0f} mg every {given['observed_interval_h']:.0f} h. "
+               "Add a level to individualise it.")
 
 st.subheader("Where the patient is now")
 m1, m2, m3, m4 = st.columns(4)

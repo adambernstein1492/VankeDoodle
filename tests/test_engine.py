@@ -1002,3 +1002,52 @@ def test_case_record_refuses_a_failed_evaluation():
     resp = vd.evaluate(_request(options={"model": "not_a_model"}))
     with pytest.raises(ValueError):
         vd.case_record(resp)
+
+
+# ------------------------------------------------- implausible-fit detection
+def test_levels_that_cannot_match_the_doses_are_flagged():
+    """Regression: 15 mg q8h cannot produce a 30 mg/L concentration.
+
+    The MAP estimate that explains it puts clearance ~150-fold below the
+    population value. The arithmetic is correct and the number is meaningless,
+    so the fit must say so rather than return it silently.
+    """
+    pt = vd.Patient(weight_kg=23.0, age_years=7.0, height_cm=122.0, scr_mg_dl=0.33)
+    doses = vd.DosingHistory.repeating(15, 8.0, 5).doses
+    levels = [vd.Level(23.5, 6.2), vd.Level(26.0, 30.2), vd.Level(31.5, 8.3)]
+    f = vd.fit(pt, doses, levels, model="smit2021")
+    assert any("cannot be reconciled" in w for w in f.warnings)
+    # the estimate itself is still returned, for inspection
+    assert f.parameters["CL"] > 0
+
+
+def test_plausible_patients_are_not_flagged():
+    """A genuinely unusual but believable patient must pass without the warning."""
+    pt = vd.Patient(weight_kg=23.0, age_years=7.0, height_cm=122.0, scr_mg_dl=0.33)
+    doses = vd.DosingHistory.repeating(450, 8.0, 5).doses
+    for level in (vd.Level(23.5, 3.0), vd.Level(23.5, 6.2), vd.Level(23.5, 14.0)):
+        f = vd.fit(pt, doses, [level], model="smit2021")
+        assert not any("cannot be reconciled" in w for w in f.warnings), level.conc_mg_l
+    # no levels at all cannot trigger it either
+    assert not any("cannot be reconciled" in w
+                   for w in vd.fit(pt, doses, [], model="smit2021").warnings)
+
+
+def test_implausibility_threshold_is_in_prior_standard_deviations():
+    from vankedoodle.bayes import IMPLAUSIBLE_Z
+    import numpy as _np
+    pt = vd.Patient(weight_kg=23.0, age_years=7.0, height_cm=122.0, scr_mg_dl=0.33)
+    doses = vd.DosingHistory.repeating(15, 8.0, 5).doses
+    f = vd.fit(pt, doses, [vd.Level(26.0, 30.2)], model="smit2021")
+    z = f.eta / _np.sqrt(_np.diag(vd.SMIT2021.omega))
+    assert _np.max(_np.abs(z)) > IMPLAUSIBLE_Z
+    assert any(f"{_np.max(_np.abs(z)):.1f} standard deviations" in w for w in f.warnings)
+
+
+def test_every_model_detects_the_same_impossible_case():
+    pt = vd.Patient(weight_kg=23.0, age_years=7.0, height_cm=122.0, scr_mg_dl=0.33)
+    doses = vd.DosingHistory.repeating(15, 8.0, 5).doses
+    levels = [vd.Level(26.0, 30.2)]
+    for name in ("smit2021", "xu2026", "le2013", "lamarre2000", "colin2019"):
+        f = vd.fit(pt, doses, levels, model=name)
+        assert any("cannot be reconciled" in w for w in f.warnings), name

@@ -65,23 +65,39 @@ def test_app_runs_clean_with_its_defaults():
     assert any("Recommended next regimen" in h.value for h in at.subheader)
 
 
-def test_app_reports_the_two_level_result_with_the_default_levels():
+def test_app_starts_with_no_levels_entered():
+    """Pre-filled measurements are unsafe: they survive a dose edit and fit a
+    patient who does not exist. The page must start with an empty levels table."""
     at = AppTest.from_file(APP, default_timeout=TIMEOUT).run()
+    assert not at.exception
+    assert any("No levels entered" in c.value for c in at.caption)
+    assert any("Two levels are needed" in i.value for i in at.info)
+    # the population prediction is still shown
+    assert any(m.label == "AUC24, current regimen" for m in at.metric)
+
+
+def test_app_loads_the_example_case_only_on_request():
+    at = AppTest.from_file(APP, default_timeout=TIMEOUT).run()
+    button = next(b for b in at.button if "example case" in b.label)
+    button.click().run()
     assert not at.exception
     labels = [m.label for m in at.metric]
     assert "AUC24, two-level" in labels
     assert "Bayesian vs two-level" in labels
+    assert any("Fitting 3 measured level" in c.value for c in at.caption)
 
 
-def test_app_explains_itself_when_only_one_level_is_entered():
+def test_app_warns_when_levels_cannot_match_the_doses():
+    """The reported failure: example levels left behind after the dose is changed.
+
+    15 mg q8h cannot produce a 30 mg/L concentration; the page must say so rather
+    than present the resulting AUC as a finding.
+    """
     at = AppTest.from_file(APP, default_timeout=TIMEOUT).run()
-    editor = at.session_state["level_table"]
-    at.session_state["level_table"] = {"edited_rows": {},
-                                       "added_rows": [],
-                                       "deleted_rows": [1, 2]}
-    at.run()
+    next(b for b in at.button if "example case" in b.label).click().run()
+    at.number_input(key="dose_mg_input").set_value(15.0).run()
     assert not at.exception
-    assert any("Two levels are needed" in i.value for i in at.info)
+    assert any("cannot be reconciled" in w.value for w in at.warning)
 
 
 def test_app_surfaces_out_of_population_warnings():
