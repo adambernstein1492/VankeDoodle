@@ -42,6 +42,12 @@ class MAPFit:
     converged: bool
     message: str = ""
     warnings: list = field(default_factory=list)
+    implausible: bool = False
+    """True when the levels cannot be reconciled with the recorded doses.
+
+    The estimate is still returned so the user can see what the data imply,
+    but it must not be presented as a finding or used to recommend a dose.
+    """
 
     # -- derived quantities --------------------------------------------
     @property
@@ -206,7 +212,8 @@ def fit(patient: Patient,
     sd_prior = np.sqrt(np.diag(mdl.omega))
     z = eta / sd_prior
     worst = int(np.argmax(np.abs(z)))
-    if abs(z[worst]) > IMPLAUSIBLE_Z:
+    implausible = bool(len(levels) and abs(z[worst]) > IMPLAUSIBLE_Z)
+    if implausible:
         name = mdl.eta_params[worst]
         fold = float(np.exp(abs(eta[worst])))
         direction = "below" if eta[worst] < 0 else "above"
@@ -230,7 +237,8 @@ def fit(patient: Patient,
                   population_parameters=mdl.typical(patient),
                   eta_covariance=cov, objective=float(best.fun),
                   converged=bool(best.success or np.isfinite(best.fun)),
-                  message=str(best.message), warnings=warn)
+                  message=str(best.message), warnings=warn,
+                  implausible=implausible)
 
 
 def simulate_levels(patient: Patient, doses: Sequence[Dose], times: Sequence[float],

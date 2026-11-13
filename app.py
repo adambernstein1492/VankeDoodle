@@ -228,6 +228,15 @@ else:
                f"{given['last_dose_mg']:.0f} mg every {given['observed_interval_h']:.0f} h. "
                "Add a level to individualise it.")
 
+bad_fit = entry.get("implausible_fit", False)
+if bad_fit:
+    for message in entry["warnings"]:
+        if "cannot be reconciled" in message:
+            st.error(message, icon=":material/error:")
+    st.caption("The numbers below are what the levels imply. They are shown so "
+               "you can see the effect of the entry that is wrong, not as a "
+               "description of this patient.")
+
 st.subheader("Where the patient is now")
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("AUC24, current regimen", _fmt(current["auc24"]),
@@ -240,9 +249,16 @@ m4.metric("Clearance", f"{entry['parameters']['CL']:.2f} L/h",
           f"{entry['n_levels_used']} level(s) used", delta_color="off")
 
 for message in entry["warnings"]:
+    if bad_fit and "cannot be reconciled" in message:
+        continue                      # already shown above, as an error
     st.warning(message, icon=":material/warning:")
 
 st.subheader("Recommended next regimen")
+if bad_fit:
+    st.error("No dose is recommended while the levels and the doses disagree. "
+             "Correct the entry above, or clear the levels to see the "
+             "population-based starting dose.", icon=":material/error:")
+    st.stop()
 r1, r2, r3, r4 = st.columns(4)
 r1.metric("Dose", f"{rec['dose_mg']:.0f} mg")
 r2.metric("Interval", f"every {rec['interval_h']:.0f} h")

@@ -97,7 +97,10 @@ def test_app_warns_when_levels_cannot_match_the_doses():
     next(b for b in at.button if "example case" in b.label).click().run()
     at.number_input(key="dose_mg_input").set_value(15.0).run()
     assert not at.exception
-    assert any("cannot be reconciled" in w.value for w in at.warning)
+    assert any("cannot be reconciled" in e.value for e in at.error)
+    # and no dose is offered on the strength of it
+    assert any("No dose is recommended" in e.value for e in at.error)
+    assert not any(m.label == "Dose" for m in at.metric)
 
 
 def test_app_surfaces_out_of_population_warnings():

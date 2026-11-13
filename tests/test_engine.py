@@ -1017,6 +1017,7 @@ def test_levels_that_cannot_match_the_doses_are_flagged():
     levels = [vd.Level(23.5, 6.2), vd.Level(26.0, 30.2), vd.Level(31.5, 8.3)]
     f = vd.fit(pt, doses, levels, model="smit2021")
     assert any("cannot be reconciled" in w for w in f.warnings)
+    assert f.implausible
     # the estimate itself is still returned, for inspection
     assert f.parameters["CL"] > 0
 
@@ -1028,6 +1029,7 @@ def test_plausible_patients_are_not_flagged():
     for level in (vd.Level(23.5, 3.0), vd.Level(23.5, 6.2), vd.Level(23.5, 14.0)):
         f = vd.fit(pt, doses, [level], model="smit2021")
         assert not any("cannot be reconciled" in w for w in f.warnings), level.conc_mg_l
+        assert not f.implausible, level.conc_mg_l
     # no levels at all cannot trigger it either
     assert not any("cannot be reconciled" in w
                    for w in vd.fit(pt, doses, [], model="smit2021").warnings)
