@@ -301,3 +301,9 @@ pytest -q        # 96 passed
 - AUC targets assume MIC = 1 mg/L, as in the 2020 consensus guideline. Xu 2026
   was developed against a 400–650 mg·h/L window rather than 400–600; pass
   `target_low` / `target_high` to match.
+
+## Licence
+
+MIT - see [LICENSE](LICENSE). The licence includes an explicit disclaimer of
+warranty, which matters here: this is a research tool, it has not been validated
+against clinical data, and it does not make clinical decisions.

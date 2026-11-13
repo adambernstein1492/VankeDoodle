@@ -8,11 +8,27 @@ version = "0.1.0"
 description = "Bayesian (model-informed) vancomycin dosing for children aged 1-18 years"
 readme = "README.md"
 requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [{name = "Adam Bernstein"}]
+keywords = ["vancomycin", "pharmacokinetics", "bayesian", "pediatrics",
+            "therapeutic drug monitoring", "model-informed precision dosing"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Healthcare Industry",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
 dependencies = ["numpy>=1.24", "scipy>=1.10"]
 
 [project.optional-dependencies]
 web = ["streamlit>=1.28", "altair>=5.0", "pandas>=2.0"]
 dev = ["pytest>=7.0", "streamlit>=1.28", "altair>=5.0", "pandas>=2.0"]
+
+[project.urls]
+Homepage = "https://github.com/adambernstein1492/VankeDoodle"
+Issues = "https://github.com/adambernstein1492/VankeDoodle/issues"
 
 [project.scripts]
 vankedoodle = "vankedoodle.cli:main"
