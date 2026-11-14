@@ -261,8 +261,42 @@ def test_charts_refuse_a_response_without_series(response):
 
 # ---------------------------------------------------------------- the page
 @pytest.fixture
-def page():
+def blank():
+    """The page as it first opens: a plausible patient and regimen, no levels."""
     return AppTest.from_file(APP, default_timeout=TIMEOUT).run()
+
+
+@pytest.fixture
+def page(blank):
+    """The page with the example case (three levels on 450 mg q8h) loaded."""
+    next(b for b in blank.sidebar.button if b.label == "Load the example case").click().run()
+    assert not blank.exception
+    return blank
+
+
+def test_app_starts_with_no_levels_entered(blank):
+    """Pre-filled measurements are unsafe: they survive a dose edit and fit a
+    patient who does not exist. The page must start with no levels."""
+    assert not blank.exception
+    assert any("No levels entered yet" in c.value for c in blank.sidebar.caption)
+    assert not any(tuple(d.value.columns) == ("#", "Drawn", "Level (mg/L)")
+                   for d in blank.sidebar.dataframe)
+    assert any("Forecasted AUC<sub>24</sub>" in m.value for m in blank.markdown)
+
+
+def test_app_withholds_the_dose_when_levels_cannot_match_the_doses(page):
+    """The reported failure: 15 mg q8h cannot produce a 30 mg/L level. The page
+    must say so, and must not offer a dose or a forecast on the strength of it."""
+    page.session_state["dose_rows"] = [{**r, "amount_mg": 15.0}
+                                       for r in page.session_state["dose_rows"]]
+    page.session_state["table_version"] = page.session_state["table_version"] + 1
+    page.run()
+    assert not page.exception
+    assert any("cannot be reconciled" in e.value for e in page.error)
+    assert any("No dose is recommended" in e.value for e in page.error)
+    assert not any("cannot be reconciled" in w.value for w in page.warning)
+    assert not any("Regimen" in d.value.columns for d in page.main.dataframe)
+    assert not any("Forecasted AUC<sub>24</sub>" in m.value for m in page.markdown)
 
 
 def test_app_runs_clean_with_its_defaults(page):
@@ -293,7 +327,8 @@ def _patient_table(page):
                 if list(d.value.columns) == ["Field", "Value"])
 
 
-def test_patient_table_shows_neonatal_fields_only_under_one_year(page):
+def test_patient_table_shows_neonatal_fields_only_under_one_year(blank):
+    page = blank
     fields = list(_patient_table(page)["Field"])
     assert fields[:2] == ["Birthdate", "Age"]
     assert "Gestational age" not in fields
@@ -311,7 +346,6 @@ def test_app_reports_the_two_level_result_with_the_default_levels(page):
     assert list(table[""]) == ["AUC24 (mg·h/L)", "Clearance (L/h)", "Half-life (h)",
                                "Volume of distribution"]
     assert table["Difference"].iloc[0].endswith("%")
-    assert "Peak risk" in labels
 
 
 def test_app_explains_itself_when_only_one_level_is_entered(page):

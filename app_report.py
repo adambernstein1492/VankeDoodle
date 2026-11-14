@@ -359,18 +359,29 @@ def build_report(response: Mapping, entry: Mapping, forecast_entry: Mapping,
     # included, has its room, so the warnings always fit on the one page.
     fy = PAGE_H - MARGIN - 0.42                     # where the footer starts
     fe = forecast_exposure
+    # Levels that cannot match the doses: the fit is shown for what it implies,
+    # but no regimen is suggested or forecast from it.
+    withheld = bool(forecast_entry.get("implausible_fit"))
     notes = list(entry.get("warnings") or []) + list(fe.get("flags") or [])
+    if withheld:
+        notes = [n for n in notes if "cannot be reconciled" not in n]
     notes = [n for i, n in enumerate(notes) if n not in notes[:i]]
     note_chars = int((W - 0.12) * 72 / (7.2 * 0.5))
     note_lines = sum(len(textwrap.wrap("•  " + n, note_chars)) for n in notes)
+    reason = next((w for w in (forecast_entry.get("warnings") or [])
+                   if "cannot be reconciled" in w), "")
+    reason_lines = len(textwrap.wrap(reason, int(W * 72 / (7.8 * 0.5)))) if withheld else 0
     below = (0.55                                   # exposure
-             + 0.83 + (len(options) + 1) * 0.165 + 0.05 + 0.22      # regimen + table
+             + ((0.25 + reason_lines * 7.8 * 1.35 / 72 + 0.3) if withheld else
+                0.83 + (len(options) + 1) * 0.165 + 0.05 + 0.22)    # regimen + table
              + ((0.25 + note_lines * 7.2 * 1.35 / 72) if notes else 0.0)
              + NOTE_CLEARANCE + 0.02)
     fig_h = min(2.75, max(1.5, fy - (y + 0.27) - below))
 
     page.heading(x0, y, "Concentration over time", W)
-    _draw_figure(page, y + 0.22, fig_h, response, entry, forecast_entry, trough_band, peak)
+    _draw_figure(page, y + 0.22, fig_h, response, entry,
+                 {**forecast_entry, "forecast": None} if withheld else forecast_entry,
+                 trough_band, peak)
     y += 0.22 + fig_h + 0.05
 
     # ---------------------------------------------------------------- exposure
@@ -395,7 +406,45 @@ def build_report(response: Mapping, entry: Mapping, forecast_entry: Mapping,
     y += 0.3
 
     # ---------------------------------------------------------------- recommendation
-    is_test = forecast_exposure is not forecast_entry.get("recommendation")
+    if withheld:
+        page.heading(x0, y, "No dose recommended", W)
+        y += 0.25
+        y += page.wrapped(xl, y, reason, W - 0.12, size=7.8, color=LEVEL_C)
+        page.text(xl, y + 0.03, "The fitted curve and current AUC24 above show what the "
+                  "levels imply, not this patient. Correct the doses, units or sample "
+                  "times and generate the report again.", size=7.2, color=MUTED)
+        y += 0.3
+    else:
+        y = _recommendation(page, y, x0, xl, W, entry, forecast_entry, fe, options,
+                            target, peak)
+
+    # ---------------------------------------------------------------- notes
+    if notes:
+        page.heading(x0, y, "Notes", W)
+        y += 0.25
+        for i, n in enumerate(notes):
+            need = len(textwrap.wrap("•  " + n, note_chars)) * 7.2 * 1.35 / 72
+            if y + need > fy - NOTE_CLEARANCE:         # keep to one page
+                page.text(x0 + 0.12, y, f"({len(notes) - i} more note(s) not shown)",
+                          size=7.0, color=MUTED)
+                break
+            y += page.wrapped(x0 + 0.12, y, "•  " + n, W - 0.12, size=7.2, color=INK)
+
+    # ---------------------------------------------------------------- footer
+    page.rule(fy - 0.06)
+    page.wrapped(x0, fy, f"Targets: AUC24 {target['low']:g}-{target['high']:g} mg·h/L "
+                 f"(aim {target['auc24']:g}); peak ceiling {peak:g} mg/L. "
+                 f"Model source: {entry.get('reference', '')}", W, size=6.4, color=MUTED)
+    page.text(PAGE_W - MARGIN, PAGE_H - MARGIN + 0.02, "Page 1 of 1", size=6.4,
+              color=MUTED, ha="right", va="bottom")
+    return page.to_pdf()
+
+
+def _recommendation(page, y, x0, xl, W, entry, forecast_entry, fe, options, target,
+                    peak) -> float:
+    """The suggested (or test) regimen and the table of alternatives; returns the
+    new y."""
+    is_test = fe is not forecast_entry.get("recommendation")
     title = "Regimen evaluated" if is_test else "Model-suggested regimen"
     page.heading(x0, y, title + " (for clinician review)", W)
     y += 0.25
@@ -441,25 +490,4 @@ def build_report(response: Mapping, entry: Mapping, forecast_entry: Mapping,
     page.text(x0 + 0.05, y + used, "Alternatives: the dose putting each regimen's AUC24 "
               f"closest to {target['auc24']:g}. Highlighted: the regimen above, when it "
               "is one of them.", size=6.8, color=MUTED)
-    y += used + 0.22
-
-    # ---------------------------------------------------------------- notes
-    if notes:
-        page.heading(x0, y, "Notes", W)
-        y += 0.25
-        for i, n in enumerate(notes):
-            need = len(textwrap.wrap("•  " + n, note_chars)) * 7.2 * 1.35 / 72
-            if y + need > fy - NOTE_CLEARANCE:         # keep to one page
-                page.text(x0 + 0.12, y, f"({len(notes) - i} more note(s) not shown)",
-                          size=7.0, color=MUTED)
-                break
-            y += page.wrapped(x0 + 0.12, y, "•  " + n, W - 0.12, size=7.2, color=INK)
-
-    # ---------------------------------------------------------------- footer
-    page.rule(fy - 0.06)
-    page.wrapped(x0, fy, f"Targets: AUC24 {target['low']:g}-{target['high']:g} mg·h/L "
-                 f"(aim {target['auc24']:g}); peak ceiling {peak:g} mg/L. "
-                 f"Model source: {entry.get('reference', '')}", W, size=6.4, color=MUTED)
-    page.text(PAGE_W - MARGIN, PAGE_H - MARGIN + 0.02, "Page 1 of 1", size=6.4,
-              color=MUTED, ha="right", va="bottom")
-    return page.to_pdf()
+    return y + used + 0.22

@@ -59,6 +59,18 @@ from top to bottom:
   interval;
 - optionally, every model side by side.
 
+The page opens with a plausible patient and regimen but **no levels**: example
+concentrations left behind after a dose is edited would fit a patient who does not
+exist. **Load the example case**, under *Load or save a case*, fills in a complete
+case with three levels.
+
+If the levels cannot be reconciled with the doses entered (the fit puts a
+parameter more than 3 prior standard deviations from the population value, as
+15 mg q8h with a 30 mg/L level does), the page says so in red above the plot,
+still draws the fit so the effect of the bad entry is visible, and withholds the
+dose table, the forecast and the report's suggested regimen until the entry is
+fixed. The API flags this as `implausible_fit`.
+
 Charts are Plotly: hover to read any value, click a legend entry to hide a curve.
 `app.py` is a thin layer over `evaluate()`; the chart and table builders in
 `app_charts.py` are pure functions of the response, so both are tested headlessly
@@ -329,7 +341,7 @@ Those virtual subjects are a test of the estimator, not clinical evidence. They
 say nothing about performance in real patients — that is what the prospective
 study is for.
 
-`pytest` runs 161 tests covering: the published typical parameter values and every
+`pytest` runs 169 tests covering: the published typical parameter values and every
 covariate term of all six models, reproduced at covariate values where each term
 reduces to a known constant; each maturation function equalling 0.5 at its own
 midpoint; Colin's clearance reaching 90 % of adult by 2 years PMA and its published

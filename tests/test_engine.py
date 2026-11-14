@@ -1293,3 +1293,67 @@ def test_history_curves_run_until_the_next_dose_is_due():
     s = vd.evaluate(_request(options={"model": "smit2021", "series": True}))["results"][0]["series"]
     # last dose at 32 h, every 8 h: the curves carry on to 40 h
     assert s["time_h"][-1] == pytest.approx(40.0)
+
+
+# ------------------------------------------------- implausible-fit detection
+def _seven_year_old():
+    return vd.Patient(weight_kg=23.0, age_years=7.0, height_cm=122.0, scr_mg_dl=0.33)
+
+
+def test_levels_that_cannot_match_the_doses_are_flagged():
+    """Regression: 15 mg q8h cannot produce a 30 mg/L concentration.
+
+    The MAP estimate that explains it puts clearance ~150-fold below the
+    population value. The arithmetic is correct and the number is meaningless,
+    so the fit must say so rather than return it silently.
+    """
+    doses = vd.DosingHistory.repeating(15, 8.0, 5).doses
+    levels = [vd.Level(23.5, 6.2), vd.Level(26.0, 30.2), vd.Level(31.5, 8.3)]
+    f = vd.fit(_seven_year_old(), doses, levels, model="smit2021")
+    assert any("cannot be reconciled" in w for w in f.warnings)
+    assert f.implausible
+    assert f.parameters["CL"] > 0          # the estimate is still returned, for inspection
+
+
+def test_plausible_patients_are_not_flagged():
+    """A genuinely unusual but believable patient must pass without the warning."""
+    doses = vd.DosingHistory.repeating(450, 8.0, 5).doses
+    for level in (vd.Level(23.5, 3.0), vd.Level(23.5, 6.2), vd.Level(23.5, 14.0)):
+        f = vd.fit(_seven_year_old(), doses, [level], model="smit2021")
+        assert not any("cannot be reconciled" in w for w in f.warnings), level.conc_mg_l
+        assert not f.implausible, level.conc_mg_l
+    prior_only = vd.fit(_seven_year_old(), doses, [], model="smit2021")
+    assert not prior_only.implausible
+    assert not any("cannot be reconciled" in w for w in prior_only.warnings)
+
+
+def test_implausibility_threshold_is_in_prior_standard_deviations():
+    from vankedoodle.bayes import IMPLAUSIBLE_Z
+    doses = vd.DosingHistory.repeating(15, 8.0, 5).doses
+    f = vd.fit(_seven_year_old(), doses, [vd.Level(26.0, 30.2)], model="smit2021")
+    z = f.eta / np.sqrt(np.diag(vd.SMIT2021.omega))
+    assert np.max(np.abs(z)) > IMPLAUSIBLE_Z
+    assert any(f"{np.max(np.abs(z)):.1f} standard deviations" in w for w in f.warnings)
+
+
+def test_every_model_detects_the_same_impossible_case():
+    doses = vd.DosingHistory.repeating(15, 8.0, 5).doses
+    for name in ("smit2021", "xu2026", "le2013", "lamarre2000", "colin2019"):
+        f = vd.fit(_seven_year_old(), doses, [vd.Level(26.0, 30.2)], model=name)
+        assert any("cannot be reconciled" in w for w in f.warnings), name
+        assert f.implausible, name
+
+
+def test_api_and_case_record_carry_the_implausible_flag():
+    req = {"patient": {"weight_kg": 23.0, "age_years": 7.0, "height_cm": 122.0,
+                       "scr_mg_dl": 0.33},
+           "regimen": {"dose_mg": 15, "interval_h": 8, "n_doses": 5, "start": 0.0},
+           "levels": [{"time": 26.0, "conc_mg_l": 30.2}],
+           "options": {"model": "smit2021", "uncertainty": False}}
+    bad = vd.evaluate(req)
+    assert bad["results"][0]["implausible_fit"] is True
+    assert vd.case_record(bad)["implausible_fit"] is True
+    req["regimen"]["dose_mg"] = 450
+    good = vd.evaluate(req)
+    assert good["results"][0]["implausible_fit"] is False
+    assert vd.case_record(good)["implausible_fit"] is False

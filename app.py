@@ -24,6 +24,7 @@ import app_charts as charts
 import app_report
 
 ASSETS = Path(__file__).resolve().parent / "assets"
+EXAMPLE_CASE = ASSETS.parent / "example_case.txt"
 LOGO = ASSETS / "vankedoodle_logo.svg"           # transparent: sits on the theme background
 TAB_ICON = ASSETS / "vankedoodle_icon.png"
 
@@ -37,8 +38,10 @@ AUTO = "Automatic"
 FORECAST_H = 48.0           # how far past the last dose the plot forecasts
 OLDEST_BIRTHDATE = dt.date.today() - dt.timedelta(days=round(30 * 365.25))
 
-# The fields start filled in with a plausible case so the page shows something
-# useful on first run. Overwrite them with your own, or load a case file.
+# The fields start filled in with a plausible patient and regimen so the page
+# shows something useful on first run. Measured levels start EMPTY: example
+# concentrations left behind after a dose is edited would fit a patient who does
+# not exist. The example case, levels included, loads only on request.
 DEFAULTS: Dict[str, Any] = {
     "weight_kg": 23.0, "height_cm": 122.0, "sex": "M",
     "birthdate": dt.date.today() - dt.timedelta(days=round(7 * 365.25)),
@@ -54,9 +57,7 @@ DEFAULTS: Dict[str, Any] = {
     "table_version": 0,
     "dose_rows": [{"time_h": 8.0 * i, "amount_mg": 450.0, "infusion_h": 1.0}
                   for i in range(5)],
-    "level_rows": [{"time_h": 23.5, "conc_mg_l": 6.2},
-                   {"time_h": 26.0, "conc_mg_l": 30.2},
-                   {"time_h": 31.5, "conc_mg_l": 8.3}],
+    "level_rows": [],
 }
 # Clinical settings, kept apart so they can be restored in one click. Bump the
 # version whenever a default changes, so an open browser tab picks it up.
@@ -168,6 +169,12 @@ def read_upload(name: str, data: bytes) -> dict:
     if name.lower().endswith(".json"):
         return json.loads(text)
     return vd.read_case_text(text)
+
+
+def load_example() -> None:
+    """Button callback: the example patient file, levels and all."""
+    apply_case(vd.read_case_text(EXAMPLE_CASE.read_text(encoding="utf8")))
+    ss.load_message = ("success", "Loaded the example case (three levels on 450 mg q8h).")
 
 
 upload = ss.get("case_upload")
@@ -333,6 +340,9 @@ with st.sidebar:
                          help="A patient file (.txt) like example_case.txt, which can be "
                               "edited by hand to add doses or levels, or a request in "
                               "JSON (.json).")
+        st.button("Load the example case", icon=":material/science:", width="stretch",
+                  on_click=load_example,
+                  help="A made-up 7-year-old on 450 mg q8h with three levels.")
         if ss.get("load_message"):
             kind, text = ss.load_message
             (st.success if kind == "success" else st.error)(text)
@@ -583,6 +593,21 @@ if ss.dosing_model != ss.model:
 forecast_exposure = (dosing_entry["candidate"] if dosing_entry.get("candidate")
                      else dosing_entry["recommendation"])
 
+# Levels that cannot be reconciled with the doses (an estimate beyond 3 prior SD)
+# make every number derived from the fit meaningless. The fit is still drawn, so
+# the effect of the wrong entry is visible, but no dose is recommended or
+# forecast from it.
+RECONCILE = "cannot be reconciled"
+bad_fit = bool(entry.get("implausible_fit"))
+bad_dosing = bool(dosing_entry.get("implausible_fit"))
+if bad_fit:
+    for message in entry["warnings"]:
+        if RECONCILE in message:
+            st.error(message, icon=":material/error:")
+    st.caption("The fitted curve and current AUC24 below are what the levels imply. "
+               "They are shown so you can see the effect of the entry that is wrong, "
+               "not as a description of this patient.")
+
 # -------------------------------------------------------------- report
 # Built only when asked for, from exactly what the page shows, and offered for
 # download only while the inputs still match it.
@@ -637,14 +662,16 @@ with side:
             if r["model"] in overlay_models and not r["ok"]:
                 st.caption(f"{r['model']}: no fit - {r.get('error') or 'not applicable'}")
     st.divider()
-    st.markdown(charts.auc_grid_html([("Current", entry["current"]),
-                                      ("Forecasted", forecast_exposure)], target),
+    st.markdown(charts.auc_grid_html(
+        [("Current", entry["current"])]
+        + ([] if bad_dosing else [("Forecasted", forecast_exposure)]), target),
                 unsafe_allow_html=True)
 with right:
     bands = ss.show_bands
     st.plotly_chart(charts.concentration_figure(
         response,
-        layers={"prior_band": bands, "fitted_band": bands, "forecast_band": bands},
+        layers={"prior_band": bands, "fitted_band": bands, "forecast_band": bands,
+                "forecast": not bad_dosing},
         trough_band=tuple(ss.trough_range) if ss.show_trough else None,
         peak_line=peak, overlay=all_models, overlay_models=overlay_models,
         forecast_from=dosing_entry, model_order=model_names),
@@ -654,11 +681,18 @@ with right:
                "another. Click a legend entry to hide a curve.")
 
 for message in entry["warnings"]:
+    if bad_fit and RECONCILE in message:
+        continue                      # already shown above, as an error
     st.warning(message, icon=":material/warning:")
 
 # -------------------------------------------------------------- alternatives
 st.divider()
 st.subheader("Alternate Dosing Recommendations")
+if bad_dosing:
+    st.error(f"No dose is recommended while the levels and the doses disagree under "
+             f"{dosing_entry['model']}. Correct the entry in the sidebar, or clear the "
+             f"levels to see the population-based starting dose.",
+             icon=":material/error:")
 grid_rows = charts.regimen_options(dosing_entry)
 ss.grid_rows = [{"dose_mg": r["dose_mg"], "interval_h": r["interval_h"],
                  "infusion_h": r["infusion_h"]} for r in grid_rows]
@@ -687,43 +721,48 @@ def _test_inputs() -> None:
                     help="An infusion as long as the interval is a continuous infusion.")
 
 
-# The table takes only the width it needs and sits centred, with the test
-# regimen beside it. Horizontal containers need a recent Streamlit; older ones
-# get a centred column layout instead.
-try:
-    row = st.container(horizontal=True, horizontal_alignment="center", gap="large",
-                       vertical_alignment="top")
-except TypeError:
-    row = None
-if row is not None:
-    with row:
-        with st.container(width=180):
-            _dosing_model_input()
-        _regimen_grid()
-        with st.container(width=180):
-            _test_inputs()
-else:
-    model_col, table_col, test_col = st.columns([0.17, 0.63, 0.2])
-    with model_col:
+if bad_dosing:
+    # Nothing to tabulate or forecast; keep the model choice so another can be tried.
+    with st.container(width=220):
         _dosing_model_input()
-    with table_col:
-        _regimen_grid()
-    with test_col:
-        _test_inputs()
-st.markdown(
-    f"<div style='text-align:center; font-size:0.85em; opacity:0.7;'>"
-    f"Optimal dose: the dose that puts the steady-state AUC24 closest to "
-    f"{target['auc24']:g} mg·h/L, rounded to a practical amount. %PTA: probability of "
-    f"an AUC24 between {target['low']:g} and {target['high']:g}. "
-    f"Select a row to forecast it on the plot.</div>", unsafe_allow_html=True)
-if dosing_entry is not entry:
-    st.info(f"The doses above and the forecast use **{ss.dosing_model}**; the fitted "
-            f"curve and current AUC24 use **{ss.model}**.", icon=":material/info:")
-elif ss.dosing_model != ss.model:
-    st.warning(f"{ss.dosing_model} produced no fit for this case, so the table uses "
-               f"{ss.model}.", icon=":material/warning:")
-for flag in (dosing_entry["candidate"]["flags"] if dosing_entry.get("candidate") else []):
-    st.info(flag, icon=":material/info:")
+else:
+    # The table takes only the width it needs and sits centred, with the test
+    # regimen beside it. Horizontal containers need a recent Streamlit; older ones
+    # get a centred column layout instead.
+    try:
+        row = st.container(horizontal=True, horizontal_alignment="center", gap="large",
+                           vertical_alignment="top")
+    except TypeError:
+        row = None
+    if row is not None:
+        with row:
+            with st.container(width=180):
+                _dosing_model_input()
+            _regimen_grid()
+            with st.container(width=180):
+                _test_inputs()
+    else:
+        model_col, table_col, test_col = st.columns([0.17, 0.63, 0.2])
+        with model_col:
+            _dosing_model_input()
+        with table_col:
+            _regimen_grid()
+        with test_col:
+            _test_inputs()
+    st.markdown(
+        f"<div style='text-align:center; font-size:0.85em; opacity:0.7;'>"
+        f"Optimal dose: the dose that puts the steady-state AUC24 closest to "
+        f"{target['auc24']:g} mg·h/L, rounded to a practical amount. %PTA: probability of "
+        f"an AUC24 between {target['low']:g} and {target['high']:g}. "
+        f"Select a row to forecast it on the plot.</div>", unsafe_allow_html=True)
+    if dosing_entry is not entry:
+        st.info(f"The doses above and the forecast use **{ss.dosing_model}**; the fitted "
+                f"curve and current AUC24 use **{ss.model}**.", icon=":material/info:")
+    elif ss.dosing_model != ss.model:
+        st.warning(f"{ss.dosing_model} produced no fit for this case, so the table uses "
+                   f"{ss.model}.", icon=":material/warning:")
+    for flag in (dosing_entry["candidate"]["flags"] if dosing_entry.get("candidate") else []):
+        st.info(flag, icon=":material/info:")
 
 # -------------------------------------------------------------- two-level method
 st.divider()

@@ -103,6 +103,8 @@ a model that cannot run is reported in its own entry rather than failing the req
       "ok": true, "error": null,
       "warnings": ["crcl = 152.7 is outside the 8.6-120 range ..."],
       "out_of_population": true,        // true when any warning is an extrapolation
+      "implausible_fit": false,         // true when the levels cannot match the doses
+                                        // (an eta beyond 3 prior SD): show no dose
       "n_levels_used": 3,
       "parameters": {"CL": 3.1, "V1": 9.3, "Q": 1.5, "V2": 11.5},
       "population_parameters": { ... }, // the prior, for contrast

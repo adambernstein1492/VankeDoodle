@@ -21,6 +21,12 @@ from .pk import CompartmentalModel, model_from_params
 
 _LOG2PI = float(np.log(2.0 * np.pi))
 
+# A MAP estimate this far from the population value, measured in prior standard
+# deviations, means the levels and the dosing history cannot both be right.
+# Real between-patient variation rarely exceeds 3 SD; a mistyped dose, wrong
+# concentration units or a mis-entered sample time easily produces 10 or more.
+IMPLAUSIBLE_Z = 3.0
+
 # Posterior sampling. The Laplace (normal) approximation at the MAP is symmetric
 # in the etas, but with few levels the true posterior is not: clearance in
 # particular has a long tail, so normal draws place the AUC interval too low.
@@ -51,6 +57,10 @@ class MAPFit:
     converged: bool
     message: str = ""
     warnings: list = field(default_factory=list)
+    implausible: bool = False
+    """True when the levels cannot be reconciled with the recorded doses. The
+    estimate is still returned so the user can see what the data imply, but it
+    must not be presented as a finding or used to recommend a dose."""
     _objective: Optional[Callable] = field(default=None, repr=False, compare=False)
     _pool: Optional[tuple] = field(default=None, repr=False, compare=False)
     _pool_built: bool = field(default=False, repr=False, compare=False)
@@ -301,6 +311,22 @@ def fit(patient: Patient,
             warn.append("Posterior covariance could not be computed; "
                         "uncertainty intervals are unavailable.")
 
+    # Is this estimate even physiologically possible under the prior?
+    z = eta / np.sqrt(np.diag(mdl.omega))
+    worst = int(np.argmax(np.abs(z)))
+    implausible = bool(abs(z[worst]) > IMPLAUSIBLE_Z)
+    if implausible:
+        name = mdl.eta_params[worst]
+        fold = float(np.exp(abs(eta[worst])))
+        direction = "below" if eta[worst] < 0 else "above"
+        warn.append(
+            f"The measured levels cannot be reconciled with the doses recorded: "
+            f"fitting them puts {name} {fold:,.0f}-fold {direction} the population "
+            f"value ({abs(z[worst]):.1f} standard deviations away, where real "
+            f"patients rarely exceed 3). Check the dose amounts, the concentration "
+            f"units and the sample times before using this result."
+        )
+
     shrink = None
     if cov is not None:
         shrink = 1.0 - np.sqrt(np.diag(cov) / np.diag(mdl.omega))
@@ -313,7 +339,8 @@ def fit(patient: Patient,
                   population_parameters=mdl.typical(patient),
                   eta_covariance=cov, objective=float(best.fun),
                   converged=bool(best.success or np.isfinite(best.fun)),
-                  message=str(best.message), warnings=warn, _objective=obj)
+                  message=str(best.message), warnings=warn,
+                  implausible=implausible, _objective=obj)
 
 
 def simulate_levels(patient: Patient, doses: Sequence[Dose], times: Sequence[float],

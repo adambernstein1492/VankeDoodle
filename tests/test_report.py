@@ -67,3 +67,31 @@ def test_report_stays_on_one_page_with_many_levels():
 def test_disclaimer_says_not_for_clinical_use():
     import app_report
     assert app_report.DISCLAIMER.startswith("NOT FOR CLINICAL DECISION-MAKING")
+
+
+def test_report_withholds_the_dose_when_the_levels_cannot_match_the_doses():
+    req = _case()
+    for d in req["doses"]:
+        d["amount_mg"] = 15.0
+    pdf = _report(req)
+    assert _pages(pdf) == 1
+    import app_report
+    req2 = _case()
+    for d in req2["doses"]:
+        d["amount_mg"] = 15.0
+    resp = vd.evaluate(req2)
+    assert resp["results"][0]["implausible_fit"]
+    # the page is drawn from text calls; capture them to check what was written
+    written = []
+    original = app_report._Page.text
+    def spy(self, x, y, s, *a, **k):
+        written.append(s)
+        return original(self, x, y, s, *a, **k)
+    app_report._Page.text = spy
+    try:
+        _report(req2)
+    finally:
+        app_report._Page.text = original
+    text = " ".join(written)
+    assert "NO DOSE RECOMMENDED" in text                  # headings are upper case
+    assert "MODEL-SUGGESTED REGIMEN" not in text
