@@ -284,8 +284,14 @@ def _frame_to_rows(frame: pd.DataFrame) -> List[Dict[str, float]]:
 def _rows_to_frame(rows: List[Dict[str, float]], columns: List[str]) -> pd.DataFrame:
     """Stored rows as an editable table with clock times."""
     frame = pd.DataFrame(rows, columns=columns)
-    frame["time"] = [_origin() + dt.timedelta(hours=float(h)) for h in frame["time_h"]]
-    return frame[["time"] + [c for c in columns if c != "time_h"]]
+    # Typed explicitly: an empty table (no levels yet) would otherwise have object
+    # columns, which the editor refuses to show as clock times and numbers.
+    frame["time"] = pd.to_datetime(pd.Series(
+        [_origin() + dt.timedelta(hours=float(h)) for h in frame["time_h"]],
+        dtype="object"))
+    numeric = [c for c in columns if c != "time_h"]
+    frame[numeric] = frame[numeric].astype("float64")
+    return frame[["time"] + numeric]
 
 
 def _time_value(value) -> str:
