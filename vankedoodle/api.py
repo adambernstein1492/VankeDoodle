@@ -29,21 +29,28 @@ from ._version import __version__
 from .bayes import fit as map_fit
 from .core import Dose, DosingHistory, Level, Patient
 from .dosing import (AUC_TARGET, AUC_TARGET_HIGH, AUC_TARGET_LOW, Exposure,
-                     predict_exposure, recommend)
+                     continuous_infusion, predict_exposure, recommend)
 from .models import MODELS, get_model
 from .reference import two_level_from_history
+from .pk import time_grid
+from .uncertainty import (concentration_band, exposure_distribution, forecast,
+                          one_compartment_interval, parameter_uncertainty,
+                          steady_state_interval)
 
 SCHEMA_VERSION = "1.0"
+DEFAULT_PEAK_THRESHOLD_MG_L = 60.0   # the peak ceiling recommend() already ranks against
+DEFAULT_FORECAST_H = 72.0
 
 _PATIENT_ALIASES = {
     "weight": "weight_kg", "wt": "weight_kg", "wt_kg": "weight_kg",
     "age": "age_years", "height": "height_cm", "ht_cm": "height_cm",
     "scr": "scr_mg_dl", "creatinine": "scr_mg_dl", "clcr": "crcl",
     "gestational_age": "gestational_age_weeks", "postnatal_age": "postnatal_age_days",
+    "dob": "birthdate", "date_of_birth": "birthdate",
 }
 _PATIENT_FIELDS = {"weight_kg", "age_years", "height_cm", "scr_mg_dl", "scr_umol_l",
                    "crcl", "gestational_age_weeks", "postnatal_age_days", "sex",
-                   "patient_id"}
+                   "patient_id", "birthdate", "age_on"}
 
 
 # ---------------------------------------------------------------- helpers
@@ -70,6 +77,9 @@ def _exposure_dict(e: Optional[Exposure], target_low: float,
         "mg_per_kg_per_day": e.mg_per_kg_per_day,
         "auc24": e.auc24, "auc24_ci": list(e.auc24_ci) if e.auc24_ci else None,
         "prob_in_target": e.prob_in_target,
+        "prob_below_target": e.prob_below_target,
+        "prob_above_target": e.prob_above_target,
+        "continuous": e.continuous,
         "in_target": bool(target_low <= e.auc24 <= target_high),
         "auc24_day": e.auc24_day, "evaluation_day": e.day,
         "cmax": e.cmax, "ctrough": e.ctrough,
@@ -77,13 +87,17 @@ def _exposure_dict(e: Optional[Exposure], target_low: float,
     })
 
 
-def _build_patient(raw: Mapping) -> Patient:
+def _build_patient(raw: Mapping, first_dose: Optional[_dt.datetime] = None) -> Patient:
+    """A Patient from the request. A birthdate without ``age_on`` gives the age on
+    the date of the first dose when doses carry clock times, otherwise today."""
     data = {}
     for key, value in dict(raw).items():
         key = _PATIENT_ALIASES.get(key, key)
         if key not in _PATIENT_FIELDS:
             raise ValueError(f"Unknown patient field {key!r}.")
         data[key] = value
+    if data.get("birthdate") and not data.get("age_on") and first_dose is not None:
+        data["age_on"] = first_dose.date()
     return Patient(**data)
 
 
@@ -111,18 +125,31 @@ def _observed_interval(history: DosingHistory) -> float:
 
 
 def _series(fit, prior_fit, history: DosingHistory, recommended: Optional[Exposure],
-            n_points: int = 300, project_h: float = 24.0) -> Dict[str, Any]:
+            n_points: int = 600, project_h: float = 24.0,
+            bands: bool = False, until_h: Optional[float] = None) -> Dict[str, Any]:
     """Concentration-time curves for plotting: history, and a forward projection.
 
     The projection begins at the last recorded dose rather than after it, so it
     overlaps the final infusion and the two curves join into one continuous line.
+    With ``bands`` the prior and posterior curves carry 95% bands (``None`` where
+    a fit has no usable covariance). ``until_h`` carries the history curves on to
+    that time, normally when the next dose is due, so a forecast that starts
+    there joins them without a gap.
     """
     t0 = min(d.start_h for d in history.doses)
     t_end = max(d.end_h for d in history.doses)
-    grid = np.linspace(t0, t_end + 1e-9, n_points)
+    if fit.levels:      # carry the curves past the last level so it sits inside them
+        t_end = max(t_end, max(l.time_h for l in fit.levels) + 1.0)
+    if until_h is not None:
+        t_end = max(t_end, float(until_h))
+    grid = time_grid(t0, t_end + 1e-9, history.doses, n_points)
     out = {"time_h": _j(grid),
            "conc_posterior": _j(fit.pk.concentrations(history.doses, grid)),
            "conc_prior": _j(prior_fit.pk.concentrations(history.doses, grid))}
+    if bands:
+        out["band_prior"] = _j(concentration_band(prior_fit, history.doses, grid))
+        out["band_posterior"] = (_j(concentration_band(fit, history.doses, grid))
+                                 if fit.levels else None)
     if recommended is not None:
         tau, amt = recommended.interval_h, recommended.dose_mg
         last = max(history.doses, key=lambda d: d.start_h)
@@ -131,7 +158,7 @@ def _series(fit, prior_fit, history: DosingHistory, recommended: Optional[Exposu
         while t < last.start_h + tau + project_h:
             future.append(Dose(amount_mg=amt, start_h=t, duration_h=recommended.infusion_h))
             t += tau
-        pgrid = np.linspace(last.start_h, last.start_h + tau + project_h, n_points)
+        pgrid = time_grid(last.start_h, last.start_h + tau + project_h, future, n_points)
         out["projection_time_h"] = _j(pgrid)
         out["projection_conc"] = _j(fit.pk.concentrations(future, pgrid))
     return out
@@ -148,6 +175,12 @@ def evaluate(request: Mapping) -> Dict[str, Any]:
     target_low = float(options.get("target_low", AUC_TARGET_LOW))
     target_high = float(options.get("target_high", AUC_TARGET_HIGH))
     want_series = bool(options.get("series", True))
+    want_uncertainty = bool(options.get("uncertainty", False))
+    want_continuous = bool(options.get("continuous_infusion", False))
+    peak_threshold = float(options.get("peak_threshold_mg_l", DEFAULT_PEAK_THRESHOLD_MG_L))
+    forecast_h = float(options.get("forecast_h", DEFAULT_FORECAST_H))
+    dose_increment = options.get("dose_increment")
+    dose_increment = float(dose_increment) if dose_increment else None
 
     requested = options.get("model", "smit2021")
     model_names = list(MODELS) if requested in ("all", "*") else (
@@ -155,15 +188,16 @@ def evaluate(request: Mapping) -> Dict[str, Any]:
 
     errors: List[str] = []
     try:
-        patient = _build_patient(request.get("patient") or {})
-    except (ValueError, TypeError) as exc:
-        errors.append(f"Patient: {exc}")
-        patient = None
-    try:
         history = _build_history(request)
     except (ValueError, KeyError, TypeError) as exc:
         errors.append(f"Doses: {exc}")
         history = None
+    try:
+        patient = _build_patient(request.get("patient") or {},
+                                 history.origin if history is not None else None)
+    except (ValueError, TypeError) as exc:
+        errors.insert(0, f"Patient: {exc}")
+        patient = None
     levels: List[Level] = []
     if history is not None:
         try:
@@ -199,13 +233,18 @@ def evaluate(request: Mapping) -> Dict[str, Any]:
                                    target_high=target_high)
         rec = recommend(fit, target_auc24=target,
                         target_low=target_low, target_high=target_high,
-                        interval_h=options.get("interval_h"))
+                        interval_h=options.get("interval_h"),
+                        dose_increment=dose_increment,
+                        max_cmax_mg_l=peak_threshold)
         candidate = None
         cand = options.get("candidate_regimen")
         if cand:
-            candidate = predict_exposure(
-                fit, float(cand["dose_mg"]), float(cand["interval_h"]),
-                cand.get("infusion_h"), target_low=target_low, target_high=target_high)
+            c_tau = float(cand["interval_h"])
+            c_inf = cand.get("infusion_h")
+            candidate = predict_exposure(          # an infusion filling its interval is continuous
+                fit, float(cand["dose_mg"]), c_tau, c_inf,
+                target_low=target_low, target_high=target_high,
+                continuous=c_inf is not None and float(c_inf) >= c_tau)
 
         residuals = fit.residuals() if levels else {}
         entry.update({
@@ -213,6 +252,8 @@ def evaluate(request: Mapping) -> Dict[str, Any]:
             "warnings": list(fit.warnings),
             "out_of_population": any("extrapolation" in w for w in fit.warnings),
             "n_levels_used": len(levels),
+            "posterior_method": fit.posterior_method,
+            "posterior_ess": _j(fit.posterior_ess),
             "parameters": _j(fit.parameters),
             "population_parameters": _j(fit.population_parameters),
             "clearance_ml_per_h_per_kg": _j(fit.cl_per_kg * 1000.0),
@@ -223,11 +264,42 @@ def evaluate(request: Mapping) -> Dict[str, Any]:
             "alternatives": [_exposure_dict(e, target_low, target_high)
                              for e in rec.options[1:]],
             "candidate": _exposure_dict(candidate, target_low, target_high),
-            "series": _series(fit, prior_fit, history, rec.best) if want_series else None,
+            "continuous_infusion": None,
+            "series": (_series(fit, prior_fit, history, rec.best, bands=want_uncertainty,
+                               until_h=last_dose.start_h + tau_given)
+                       if want_series else None),
         })
+        infusion = None
+        if want_continuous:
+            infusion = continuous_infusion(fit, target_auc24=target,
+                                           dose_increment=dose_increment,
+                                           target_low=target_low, target_high=target_high)
+            entry["continuous_infusion"] = _exposure_dict(infusion, target_low, target_high)
+        if want_uncertainty:
+            def dist(e):
+                return _j(exposure_distribution(fit, e, target_low, target_high,
+                                                peak_threshold))
+            entry["recommendation"]["distribution"] = dist(rec.best)
+            for d, e in zip(entry["alternatives"], rec.options[1:]):
+                d["distribution"] = dist(e)
+            if candidate is not None:
+                entry["candidate"]["distribution"] = dist(candidate)
+            if infusion is not None:
+                entry["continuous_infusion"]["distribution"] = dist(infusion)
+            shown = candidate if candidate is not None else rec.best
+            entry["forecast"] = _j({
+                "regimen": "candidate" if candidate is not None else "recommendation",
+                **forecast(fit, shown.dose_mg, shown.interval_h, shown.infusion_h,
+                           horizon_h=forecast_h,
+                           start_h=last_dose.start_h + tau_given)})
+            entry["parameter_uncertainty"] = _j(parameter_uncertainty(fit))
+            entry["steady_state_interval"] = _j(steady_state_interval(
+                fit, last_dose.amount_mg, tau_given, last_dose.duration_h))
         results.append(entry)
 
     sz = _j(two_level_from_history(history.doses, levels, interval_h=tau_given))
+    if sz["available"]:
+        sz["curve"] = _j(one_compartment_interval(sz))
     comparison = {"sawchuk_zaske_auc24": sz.get("auc24") if sz["available"] else None,
                   "bayesian_auc24": {}, "percent_difference": {}}
     for entry in results:
@@ -253,6 +325,8 @@ def evaluate(request: Mapping) -> Dict[str, Any]:
             "crcl_bedside_schwartz": patient.crcl, "pma_weeks": patient.pma_weeks,
             "gestational_age_weeks": patient.gestational_age_weeks,
             "postnatal_age_days": patient.postnatal_age_days,
+            "birthdate": patient.birthdate.isoformat() if patient.birthdate else None,
+            "age_on": patient.age_on.isoformat() if patient.age_on else None,
             "assumed_term_gestation": patient.assumed_term_gestation,
         }),
         "regimen_given": _j({
@@ -266,7 +340,8 @@ def evaluate(request: Mapping) -> Dict[str, Any]:
             "time_origin": history.origin.isoformat() if history.origin else None,
         }),
         "levels": _j([{"time_h": l.time_h, "conc_mg_l": l.conc_mg_l} for l in levels]),
-        "target": {"auc24": target, "low": target_low, "high": target_high},
+        "target": {"auc24": target, "low": target_low, "high": target_high,
+                   "peak_threshold_mg_l": peak_threshold},
         "results": results,
         "sawchuk_zaske": sz,
         "comparison": _j(comparison),

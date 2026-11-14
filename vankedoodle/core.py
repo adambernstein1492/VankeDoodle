@@ -8,7 +8,7 @@ helpers here normalise both to hours.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Iterable, Optional, Sequence, Union
 
 TimeLike = Union[float, int, str, datetime]
@@ -35,6 +35,33 @@ def to_hours(value: TimeLike, origin: Optional[datetime] = None) -> float:
     if origin is None:
         raise ValueError("A datetime was supplied but no time origin is set.")
     return (dt - origin).total_seconds() / 3600.0
+
+
+DateLike = Union[str, date, datetime]
+
+
+def _parse_date(value: DateLike) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return _parse_dt(value).date()
+
+
+def age_from_birthdate(birthdate: DateLike, on: Optional[DateLike] = None
+                       ) -> dict:
+    """Postnatal age on the date ``on`` (default: today), in days and years.
+
+    Returns ``{"age_days": int, "age_years": float}``; years use 365.25 days.
+    Raises ValueError when the birthdate falls after ``on``.
+    """
+    born = _parse_date(birthdate)
+    ref = _parse_date(on) if on is not None else date.today()
+    days = (ref - born).days
+    if days < 0:
+        raise ValueError(f"The birthdate {born.isoformat()} is after "
+                         f"{ref.isoformat()}, the date the age is taken on.")
+    return {"age_days": days, "age_years": days / DAYS_PER_YEAR}
 
 
 def bedside_schwartz(height_cm: float, scr_mg_dl: float) -> float:
@@ -122,6 +149,8 @@ class Patient:
     postnatal_age_days: Optional[float] = None
     sex: Optional[str] = None
     patient_id: Optional[str] = None
+    birthdate: Optional[DateLike] = None       # sets the two ages above when they are absent
+    age_on: Optional[DateLike] = None          # the date the age is taken on (default: today)
     assumed_term_gestation: bool = field(default=False, init=False)
 
     def __post_init__(self):
@@ -133,6 +162,14 @@ class Patient:
             self.scr_umol_l = float(self.scr_mg_dl) / SCR_MG_DL_PER_UMOL_L
         if self.scr_mg_dl is not None and self.scr_mg_dl <= 0:
             raise ValueError("Serum creatinine must be > 0.")
+        if self.birthdate is not None:
+            self.birthdate = _parse_date(self.birthdate)
+            self.age_on = _parse_date(self.age_on) if self.age_on is not None else date.today()
+            age = age_from_birthdate(self.birthdate, self.age_on)
+            if self.postnatal_age_days is None:
+                self.postnatal_age_days = float(age["age_days"])
+            if self.age_years is None:
+                self.age_years = age["age_years"]
         if self.age_years is None and self.postnatal_age_days is not None:
             self.age_years = float(self.postnatal_age_days) / DAYS_PER_YEAR
         if self.crcl is None and self.height_cm is not None and self.scr_mg_dl is not None:

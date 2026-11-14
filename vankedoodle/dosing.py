@@ -78,6 +78,9 @@ class Exposure:
     day: int = EVALUATION_DAY
     auc24_ci: Optional[tuple] = None
     prob_in_target: Optional[float] = None
+    prob_below_target: Optional[float] = None
+    prob_above_target: Optional[float] = None
+    continuous: bool = False                   # a continuous infusion (no trough)
     flags: list = field(default_factory=list)
 
     def as_dict(self) -> Dict[str, object]:
@@ -102,7 +105,8 @@ def predict_exposure(source, dose_mg: float, interval_h: float,
                      target_low: float = AUC_TARGET_LOW,
                      target_high: float = AUC_TARGET_HIGH,
                      day: int = EVALUATION_DAY,
-                     weight_kg: Optional[float] = None) -> Exposure:
+                     weight_kg: Optional[float] = None,
+                     continuous: bool = False) -> Exposure:
     """Exposure for a candidate regimen.
 
     ``auc24`` is the steady-state value (total daily dose / CL, exact for any
@@ -112,6 +116,11 @@ def predict_exposure(source, dose_mg: float, interval_h: float,
 
     ``source`` is a :class:`MAPFit` (individual parameters, with uncertainty) or a
     dict of CL/V1/Q/V2.
+
+    An infusion as long as its interval is taken as an entry slip and shortened
+    to leave a gap, unless ``continuous`` is set: then each infusion runs the
+    whole interval, back to back, and ``cmax`` is the concentration at the end
+    of day ``day``.
     """
     if isinstance(source, MAPFit):
         pars = source.parameters
@@ -120,9 +129,11 @@ def predict_exposure(source, dose_mg: float, interval_h: float,
         pars = dict(source)
     pk = model_from_params(pars)
 
-    if infusion_h is None:
+    if continuous:
+        infusion_h = interval_h
+    elif infusion_h is None:
         infusion_h = infusion_duration(dose_mg)
-    if infusion_h >= interval_h:
+    if infusion_h >= interval_h and not continuous:
         infusion_h = max(0.5, interval_h - 0.5)
 
     tdd = dose_mg * 24.0 / interval_h
@@ -136,12 +147,14 @@ def predict_exposure(source, dose_mg: float, interval_h: float,
     auc24_day = pk.auc(doses, 24.0 * (day - 1), 24.0 * day)
 
     auc_ci = None
-    p_target = None
+    p_target = p_below = p_above = None
     if ci and isinstance(source, MAPFit) and source.eta_covariance is not None:
         cls = np.array([p["CL"] for p in source.parameter_samples(n=n_samples)])
         aucs = tdd / cls
         auc_ci = (float(np.percentile(aucs, 5)), float(np.percentile(aucs, 95)))
         p_target = float(np.mean((aucs >= target_low) & (aucs <= target_high)))
+        p_below = float(np.mean(aucs < target_low))
+        p_above = float(np.mean(aucs > target_high))
 
     flags = []
     if weight_kg and tdd / weight_kg > MG_PER_KG_PER_DAY_ALERT:
@@ -152,7 +165,7 @@ def predict_exposure(source, dose_mg: float, interval_h: float,
         flags.append(f"Predicted AUC24 {auc24:.0f} is below the {target_low:.0f} target.")
     if auc24 > target_high:
         flags.append(f"Predicted AUC24 {auc24:.0f} exceeds the {target_high:.0f} target.")
-    if ctrough > 20:
+    if ctrough > 20 and not continuous:
         flags.append(f"Predicted day-{day} trough {ctrough:.1f} mg/L is above 20 mg/L.")
 
     return Exposure(dose_mg=float(dose_mg), interval_h=float(interval_h),
@@ -160,7 +173,9 @@ def predict_exposure(source, dose_mg: float, interval_h: float,
                     mg_per_kg_per_day=float(tdd / weight_kg) if weight_kg else float("nan"),
                     auc24=float(auc24), cmax=cmax, ctrough=ctrough,
                     auc24_day=float(auc24_day), day=int(day),
-                    auc24_ci=auc_ci, prob_in_target=p_target, flags=flags)
+                    auc24_ci=auc_ci, prob_in_target=p_target,
+                    prob_below_target=p_below, prob_above_target=p_above,
+                    continuous=bool(continuous), flags=flags)
 
 
 @dataclass
@@ -266,6 +281,36 @@ def recommend(source,
     options_sorted = sorted(options, key=rank)
     return Recommendation(best=options_sorted[0], options=options_sorted,
                           target_auc24=target_auc24, basis=basis, warnings=warns)
+
+
+def continuous_infusion(source, target_auc24: float = AUC_TARGET,
+                        dose_increment: Optional[float] = None,
+                        max_daily_dose_mg: float = 4500.0,
+                        target_low: float = AUC_TARGET_LOW,
+                        target_high: float = AUC_TARGET_HIGH,
+                        ci: bool = True,
+                        weight_kg: Optional[float] = None) -> Exposure:
+    """A continuous infusion whose daily amount puts the AUC24 on target.
+
+    At steady state AUC24 = daily amount / CL, as for intermittent dosing, so the
+    daily amount is target x CL, rounded. It is modelled as back-to-back 24-hour
+    infusions (``interval_h`` = ``infusion_h`` = 24), so the "peak" reported is
+    the concentration at the end of day ``EVALUATION_DAY``. No loading dose is
+    included.
+    """
+    if isinstance(source, MAPFit):
+        cl = source.parameters["CL"]
+        wt = weight_kg or source.patient.weight_kg
+    else:
+        cl = float(dict(source)["CL"])
+        wt = weight_kg
+    raw = target_auc24 * cl
+    daily = round_dose(min(raw, max_daily_dose_mg), dose_increment)
+    exp = predict_exposure(source, daily, 24.0, 24.0, ci=ci, target_low=target_low,
+                           target_high=target_high, weight_kg=wt, continuous=True)
+    if raw > max_daily_dose_mg:
+        exp.flags.append(f"Daily-dose ceiling of {max_daily_dose_mg:g} mg applied.")
+    return exp
 
 
 def initial_dose(patient: Patient, target_auc24: float = AUC_TARGET,

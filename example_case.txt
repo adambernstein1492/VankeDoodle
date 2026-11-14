@@ -1,0 +1,25 @@
+# VankeDoodle patient file
+# Lines starting with # are notes and are ignored.
+# Dates are MM/DD/YYYY and times are 24-hour HH:MM.
+
+Patient ID: example-001
+Birthdate: 03/02/2019
+Sex: M
+Weight (kg): 23
+Height (cm): 122
+Creatinine (mg/dL): 0.33
+Model: smit2021
+
+[Doses]
+# Date       Time   Dose (mg)  Infusion (h)
+03/02/2026   08:00  450        1
+03/02/2026   16:00  450        1
+03/03/2026   00:00  450        1
+03/03/2026   08:00  450        1
+03/03/2026   16:00  450        1
+
+[Levels]
+# Date       Time   Level (mg/L)
+03/03/2026   07:30  6.2
+03/03/2026   10:00  30.2
+03/03/2026   15:30  8.3

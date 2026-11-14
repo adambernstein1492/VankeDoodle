@@ -9,16 +9,31 @@ level pulls the estimate toward the individual.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Sequence
+from typing import Callable, Dict, Optional, Sequence
 
 import numpy as np
 from scipy.optimize import minimize
+from scipy.stats import multivariate_t
 
 from .core import Dose, Level, Patient
 from .models import PopPKModel, get_model
 from .pk import CompartmentalModel, model_from_params
 
 _LOG2PI = float(np.log(2.0 * np.pi))
+
+# Posterior sampling. The Laplace (normal) approximation at the MAP is symmetric
+# in the etas, but with few levels the true posterior is not: clearance in
+# particular has a long tail, so normal draws place the AUC interval too low.
+# Draws are therefore taken by adaptive importance sampling: a heavy-tailed
+# proposal around the MAP gives a first estimate of the posterior's mean and
+# covariance, each later stage's proposal is built from the previous estimate,
+# and the last stage's draws, weighted by the exact posterior over the proposal
+# density, form a pool that is resampled into equally weighted draws. Three
+# stages keep the effective sample size above ~2000 in the hardest cases tested.
+SAMPLING_STAGES = ((2000, 1.3), (2000, 1.3), (6000, 1.3))   # (draws, spread) per stage
+PROPOSAL_DF = 5                 # multivariate t: heavier tails than the posterior
+MIN_EFFECTIVE_DRAWS = 500       # below this the weights are unreliable
+POOL_SEED = 20240611            # the pool is fixed for a fit; ``seed`` picks from it
 
 
 @dataclass
@@ -36,6 +51,9 @@ class MAPFit:
     converged: bool
     message: str = ""
     warnings: list = field(default_factory=list)
+    _objective: Optional[Callable] = field(default=None, repr=False, compare=False)
+    _pool: Optional[tuple] = field(default=None, repr=False, compare=False)
+    _pool_built: bool = field(default=False, repr=False, compare=False)
 
     # -- derived quantities --------------------------------------------
     @property
@@ -72,12 +90,97 @@ class MAPFit:
     def auc(self, t_start: float, t_end: float) -> float:
         return self.pk.auc(self.doses, t_start, t_end)
 
+    # -- posterior draws -----------------------------------------------
+    def _posterior_pool(self) -> Optional[tuple]:
+        """Importance-weighted draws ``(etas, weights, ess)``, built once per fit.
+
+        None when the normal draws are exact (no levels: the posterior is the
+        population prior) or the weights proved unreliable (a warning is added).
+        """
+        if self._pool_built:
+            return self._pool
+        self._pool_built = True
+        if not self.levels or self._objective is None or self.eta_covariance is None:
+            return None
+        rng = np.random.default_rng(POOL_SEED)
+        # the first stage is centred on the MAP with the Laplace covariance
+        loc, shape = self.eta, self.eta_covariance * SAMPLING_STAGES[0][1] ** 2
+        for i, (n, _) in enumerate(SAMPLING_STAGES):
+            draws, w, ess = self._weighted_draws(loc, shape, n, rng)
+            last = i == len(SAMPLING_STAGES) - 1
+            if last or ess < 50:            # too few to re-estimate the moments
+                continue
+            mean = w @ draws
+            centred = draws - mean
+            cov = (centred * w[:, None]).T @ centred
+            if np.all(np.linalg.eigvalsh(cov) > 0):
+                # a t's covariance is shape * df / (df - 2)
+                spread = SAMPLING_STAGES[i + 1][1]
+                loc, shape = mean, cov * (PROPOSAL_DF - 2) / PROPOSAL_DF * spread ** 2
+        if ess < MIN_EFFECTIVE_DRAWS:
+            self.warnings.append(
+                "The posterior could not be sampled reliably; uncertainty intervals use "
+                "a normal approximation and may be too narrow or shifted.")
+            return None
+        self._pool = (draws, w, ess)
+        return self._pool
+
+    def _weighted_draws(self, loc, shape, n, rng):
+        """Draws from a multivariate t proposal, with normalised importance weights
+        (exact posterior over proposal density) and their effective sample size."""
+        k = len(self.eta)
+        proposal = multivariate_t(loc=loc, shape=shape, df=PROPOSAL_DF, seed=rng)
+        draws = np.asarray(proposal.rvs(size=n), dtype=float).reshape(-1, k)
+        log_w = -0.5 * np.array([self._objective(e) for e in draws]) - proposal.logpdf(draws)
+        log_w[~np.isfinite(log_w)] = -np.inf
+        if not np.any(np.isfinite(log_w)):
+            return draws, np.full(n, 1.0 / n), 0.0
+        w = np.exp(log_w - np.max(log_w))
+        w /= w.sum()
+        return draws, w, float(1.0 / np.sum(w ** 2))
+
+    @property
+    def posterior_method(self) -> str:
+        """How posterior draws are made: "prior" (no levels; normal and exact),
+        "importance sampling", "normal approximation" (the fallback), or "none"."""
+        if self.eta_covariance is None:
+            return "none"
+        if not self.levels:
+            return "prior"
+        return "importance sampling" if self._posterior_pool() else "normal approximation"
+
+    @property
+    def posterior_ess(self) -> Optional[float]:
+        """Effective number of independent draws behind the importance weights."""
+        pool = self._posterior_pool()
+        return pool[2] if pool else None
+
+    @property
+    def posterior_covariance(self) -> Optional[np.ndarray]:
+        """Covariance of the etas under the posterior actually sampled."""
+        pool = self._posterior_pool()
+        if pool is None:
+            return self.eta_covariance
+        draws, w, _ = pool
+        mean = w @ draws
+        centred = draws - mean
+        return (centred * w[:, None]).T @ centred
+
     def sample_etas(self, n: int = 2000, seed: Optional[int] = 0) -> np.ndarray:
-        """Draw from the Laplace (normal) approximation to the eta posterior."""
+        """Equally weighted draws from the eta posterior.
+
+        Resampled from the importance-weighted pool when it is available;
+        otherwise drawn from the normal (Laplace) approximation, which is exact
+        when there are no levels.
+        """
         if self.eta_covariance is None:
             raise RuntimeError("Posterior covariance unavailable for this fit.")
         rng = np.random.default_rng(seed)
-        return rng.multivariate_normal(self.eta, self.eta_covariance, size=int(n))
+        pool = self._posterior_pool()
+        if pool is None:
+            return rng.multivariate_normal(self.eta, self.eta_covariance, size=int(n))
+        draws, w, _ = pool
+        return draws[rng.choice(len(w), size=int(n), replace=True, p=w)]
 
     def parameter_samples(self, n: int = 2000, seed: Optional[int] = 0) -> list:
         return [self.model.individual(self.patient, e)
@@ -105,8 +208,10 @@ def _objective_factory(patient, model, doses, levels):
             if not np.all(np.isfinite(pred)) or np.any(pred <= 0):
                 return 1e12
             var = (model.sigma_prop * pred) ** 2 + model.sigma_add ** 2
-            val += float(np.sum((obs - pred) ** 2 / var + np.log(2.0 * np.pi * var)))
-        return val
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                val += float(np.sum((obs - pred) ** 2 / var + np.log(2.0 * np.pi * var)))
+        # far from the mode the variance can overflow; treat that as impossible
+        return val if np.isfinite(val) else 1e12
 
     return obj
 
@@ -208,7 +313,7 @@ def fit(patient: Patient,
                   population_parameters=mdl.typical(patient),
                   eta_covariance=cov, objective=float(best.fun),
                   converged=bool(best.success or np.isfinite(best.fun)),
-                  message=str(best.message), warnings=warn)
+                  message=str(best.message), warnings=warn, _objective=obj)
 
 
 def simulate_levels(patient: Patient, doses: Sequence[Dose], times: Sequence[float],

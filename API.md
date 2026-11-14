@@ -28,7 +28,10 @@ anything that removes or repurposes a field will.
   "case_id": "example-001",            // optional, echoed back and stored on the record
   "patient": {
     "weight_kg": 23.0,                 // required
-    "age_years": 7.0,
+    "age_years": 7.0,                  // or "birthdate" instead of an age:
+    "birthdate": null,                 //   "YYYY-MM-DD"; sets age_years and postnatal_age_days
+    "age_on": null,                    //   date the age is taken on (default: first dose date
+                                       //   when doses carry clock times, otherwise today)
     "height_cm": 122.0,
     "sex": "M",                        // only used by lamarre2000 (Schwartz k)
     "scr_mg_dl": 0.33,                 // or "scr_umol_l"; the other is derived
@@ -57,7 +60,12 @@ anything that removes or repurposes a field will.
     "target_low": 400, "target_high": 600,
     "interval_h": null,                // pin the interval instead of letting it be chosen
     "candidate_regimen": {"dose_mg": 525, "interval_h": 8, "infusion_h": 1.0},
-    "series": true                     // include plot-ready curves
+    "series": true,                    // include plot-ready curves
+    "uncertainty": false,              // bands, distributions, forecast (about 1.5 s per model)
+    "peak_threshold_mg_l": 60,         // peak ceiling: ranks the recommendation, sets peak risk
+    "dose_increment": null,            // round doses to this many mg (null = automatic)
+    "forecast_h": 72,                  // length of the forecast when uncertainty is on
+    "continuous_infusion": false       // also optimise a continuous infusion
   }
 }
 ```
@@ -81,7 +89,7 @@ a model that cannot run is reported in its own entry rather than failing the req
   "generated_at": "2026-03-04T09:15:00+10:00",
   "case_id": "example-001",
 
-  "patient": { /* inputs plus derived crcl_bedside_schwartz, pma_weeks,
+  "patient": { /* inputs plus derived crcl_bedside_schwartz, pma_weeks, age_on,
                   both creatinine units, assumed_term_gestation */ },
   "regimen_given": { "doses": [...], "observed_interval_h": 8.0,
                      "total_daily_dose_mg": 1350.0, "mg_per_kg_per_day": 58.7, ... },
@@ -144,7 +152,39 @@ one shape:
 | `in_target` | whether `auc24` falls in `[target.low, target.high]` |
 | `auc24_day`, `evaluation_day` | actual AUC over day 3 of therapy |
 | `cmax`, `ctrough` | peak and trough on that day |
+| `prob_below_target`, `prob_above_target` | posterior probability of falling below / above the window |
+| `continuous` | true for a continuous infusion (`infusion_h` = `interval_h`; `cmax` is the end-of-day concentration) |
 | `flags` | dose-ceiling and out-of-range notices, written for display |
+| `distribution` | only with `uncertainty`: see below |
+
+With `options.continuous_infusion = true` each model entry also carries
+`continuous_infusion`: an exposure, in the same form, for a continuous infusion
+whose daily amount puts the AUC24 on target (no loading dose). A
+`candidate_regimen` whose `infusion_h` fills its `interval_h` is evaluated as a
+continuous infusion too.
+
+### With `options.uncertainty = true`
+
+Each model entry additionally carries:
+
+| field | meaning |
+|---|---|
+| `series.band_prior`, `series.band_posterior` | `{low, high, level}`: 95% pointwise bands on the same `time_h` grid (`band_posterior` is `null` with no levels) |
+| `recommendation.distribution`, each `alternatives[i].distribution`, `candidate.distribution`, `continuous_infusion.distribution` | `prob_below_target`, `prob_in_target`, `prob_above_target`, `prob_peak_above`, `auc24_mean`, `auc24_median`, `peak_median`, and `histogram: {bin_edges, density}` (10 mg·h/L bins) |
+| `forecast` | the history followed by the candidate (or, without one, the recommendation) from when the next dose is due on the current schedule (`next_dose_h`): `time_h`, `conc`, `low`, `high`, `dose_times_h`, `forecast_start_h` (the last dose given), `next_dose_h`, `regimen` |
+| `parameter_uncertainty` | per parameter with variability: `prior_cv_pct`, `posterior_cv_pct` |
+| `steady_state_interval` | one interval of the current regimen on the evaluation day: `time_into_interval_h`, `conc` |
+
+Posterior draws come from adaptive importance sampling: proposals around the MAP
+estimate are weighted by the exact posterior, so intervals and probabilities keep
+the posterior's real (often skewed) shape. Each model entry reports how:
+`posterior_method` is `"importance sampling"`, `"prior"` (no levels; the normal
+prior is exact), or `"normal approximation"` (a fallback, with a warning, when the
+weights are unreliable), and `posterior_ess` is the effective number of draws.
+Draws are seeded, so the same request always gives the same numbers. Every
+curve's time grid includes each infusion start and end, so peaks are exact.
+`sawchuk_zaske.curve` (`time_into_interval_h`, `conc`) is always present when the
+two-level result is available.
 
 ### Errors
 
@@ -166,7 +206,7 @@ not a JSON object — raises.
 
 ### Payload size
 
-`series` adds roughly 40 KB per model. Request curves for the one model being
+`series` adds roughly 40 KB per model, and `uncertainty` roughly 80 KB more. Request curves for the one model being
 displayed and `"series": false` for a `"model": "all"` comparison table.
 
 ---

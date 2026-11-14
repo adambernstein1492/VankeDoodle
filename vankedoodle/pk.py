@@ -218,3 +218,12 @@ def model_from_params(pars: Dict[str, float]) -> CompartmentalModel:
         "Cannot build a structural model from parameters "
         f"{sorted(keys)}; expected {{CL, V}} or {{CL, V1, Q, V2}}."
     )
+
+
+def time_grid(t0: float, t1: float, doses, n_points: int = 600) -> np.ndarray:
+    """Evenly spaced times from ``t0`` to ``t1`` plus every infusion start and end
+    in between, so that each peak and trough falls exactly on the grid and a
+    plotted curve never cuts a peak short."""
+    base = np.linspace(t0, t1, n_points)
+    events = [t for d in doses for t in (d.start_h, d.end_h) if t0 <= t <= t1]
+    return np.unique(np.concatenate([base, np.asarray(events, dtype=float)]))

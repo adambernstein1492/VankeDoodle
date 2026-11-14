@@ -923,7 +923,9 @@ def test_api_series_are_plot_ready():
     # The projection begins at the last recorded dose, so it overlaps the final
     # infusion and a front end can draw the two curves as one continuous line.
     assert series["projection_time_h"][0] <= max(series["time_h"])
-    assert series["projection_time_h"][-1] > max(series["time_h"]) + 24.0
+    # ...and runs one recommended interval plus a day past the last dose (32 h)
+    rec = resp["results"][0]["recommendation"]
+    assert series["projection_time_h"][-1] == pytest.approx(32.0 + rec["interval_h"] + 24.0)
 
 
 def test_api_candidate_regimen_is_evaluated():
@@ -1002,3 +1004,292 @@ def test_case_record_refuses_a_failed_evaluation():
     resp = vd.evaluate(_request(options={"model": "not_a_model"}))
     with pytest.raises(ValueError):
         vd.case_record(resp)
+
+
+# ---------------------------------------------------------------- uncertainty output
+def _uncertain(**opts):
+    return vd.evaluate(_request(options={"model": "smit2021", "series": True,
+                                         "uncertainty": True, **opts}))
+
+
+def test_uncertainty_is_off_by_default_and_costs_nothing():
+    entry = vd.evaluate(_request())["results"][0]
+    assert "distribution" not in entry["recommendation"]
+    assert "forecast" not in entry
+
+
+def test_bands_contain_their_curves():
+    s = _uncertain()["results"][0]["series"]
+    for curve, band in (("conc_prior", "band_prior"), ("conc_posterior", "band_posterior")):
+        lo, hi, mid = (np.array(s[band]["low"]), np.array(s[band]["high"]),
+                       np.array(s[curve]))
+        assert len(lo) == len(mid)
+        assert np.all(lo <= hi + 1e-9)
+        # the MAP curve need not be the pointwise median, but it lies inside the band
+        assert np.mean((mid >= lo - 1e-6) & (mid <= hi + 1e-6)) > 0.95
+
+
+def test_levels_narrow_the_band():
+    s = _uncertain()["results"][0]["series"]
+    width = lambda b: np.mean(np.array(b["high"]) - np.array(b["low"]))
+    assert width(s["band_posterior"]) < width(s["band_prior"])
+
+
+def test_distribution_agrees_with_the_exposure_it_describes():
+    rec = _uncertain()["results"][0]["recommendation"]
+    d = rec["distribution"]
+    assert d["prob_below_target"] + d["prob_in_target"] + d["prob_above_target"] == \
+        pytest.approx(1.0)
+    assert d["prob_in_target"] == pytest.approx(rec["prob_in_target"], abs=0.03)
+    assert sum(d["histogram"]["density"]) == pytest.approx(1.0)
+    assert 400.0 in d["histogram"]["bin_edges"] and 600.0 in d["histogram"]["bin_edges"]
+    assert d["auc24_median"] == pytest.approx(rec["auc24"], rel=0.05)
+
+
+def test_peak_risk_follows_the_threshold():
+    low = _uncertain(peak_threshold_mg_l=20.0)["results"][0]["recommendation"]
+    high = _uncertain(peak_threshold_mg_l=200.0)["results"][0]["recommendation"]
+    assert low["distribution"]["prob_peak_above"] > 0.5
+    assert high["distribution"]["prob_peak_above"] == 0.0
+
+
+def test_every_alternative_carries_a_distribution():
+    entry = _uncertain()["results"][0]
+    assert entry["alternatives"]
+    assert all(a["distribution"]["histogram"] for a in entry["alternatives"])
+
+
+def test_forecast_follows_the_candidate_when_one_is_given():
+    plain = _uncertain()["results"][0]["forecast"]
+    assert plain["regimen"] == "recommendation"
+    cand = _uncertain(candidate_regimen={"dose_mg": 600, "interval_h": 12})["results"][0]
+    f = cand["forecast"]
+    assert f["regimen"] == "candidate" and f["dose_mg"] == 600 and f["interval_h"] == 12
+    assert f["time_h"][-1] == pytest.approx(f["forecast_start_h"] + 72.0)
+    # the history part of the forecast reproduces the fitted curve
+    s = cand["series"]
+    t = np.array(s["time_h"])
+    hist = t < f["forecast_start_h"] + 12.0 - 1e-6
+    # (compared by median, since linear interpolation clips the sharp peaks)
+    a = np.interp(t[hist], f["time_h"], f["conc"])
+    b = np.array(s["conc_posterior"])[hist]
+    assert np.median(np.abs(a - b)) < 0.2
+    assert np.all(np.array(f["low"]) <= np.array(f["high"]) + 1e-9)
+
+
+def test_posterior_cv_is_smaller_than_prior_cv():
+    for row in _uncertain()["results"][0]["parameter_uncertainty"]:
+        assert row["posterior_cv_pct"] < row["prior_cv_pct"]
+
+
+def test_prior_only_case_has_no_posterior_band_or_cv():
+    entry = vd.evaluate(_request(levels=[], options={"model": "smit2021", "series": True,
+                                                     "uncertainty": True}))["results"][0]
+    assert entry["series"]["band_posterior"] is None
+    assert entry["series"]["band_prior"] is not None
+    assert all(r["posterior_cv_pct"] is None for r in entry["parameter_uncertainty"])
+
+
+def test_one_compartment_curve_passes_through_the_levels_it_used():
+    sz = vd.evaluate(_request())["sawchuk_zaske"]
+    c = sz["curve"]
+    for lv in sz["levels_used"]:
+        assert np.interp(lv["hours_into_interval"], c["time_into_interval_h"],
+                         c["conc"]) == pytest.approx(lv["conc_mg_l"], rel=1e-3)
+
+
+def test_steady_state_interval_matches_the_reported_peak_and_trough():
+    entry = _uncertain()["results"][0]
+    ss, cur = entry["steady_state_interval"], entry["current"]
+    assert max(ss["conc"]) == pytest.approx(cur["cmax"], rel=1e-2)
+    assert ss["conc"][-1] == pytest.approx(cur["ctrough"], rel=1e-6)
+
+
+def test_uncertainty_output_is_json_serialisable_for_every_model():
+    resp = _uncertain(model="all")
+    _json.dumps(resp)
+    assert all(r["ok"] for r in resp["results"])
+
+
+# ---------------------------------------------------------------- birthdate
+def test_age_from_birthdate():
+    a = vd.age_from_birthdate("2019-03-02", on="2026-03-02")
+    assert a["age_days"] == 2557
+    assert a["age_years"] == pytest.approx(7.0, abs=0.01)
+    with pytest.raises(ValueError, match="after"):
+        vd.age_from_birthdate("2026-03-03", on="2026-03-02")
+
+
+def test_patient_birthdate_sets_both_ages():
+    p = vd.Patient(weight_kg=4.0, birthdate="2026-02-01", age_on="2026-03-02",
+                   gestational_age_weeks=36.0)
+    assert p.postnatal_age_days == 29
+    assert p.age_years == pytest.approx(29 / 365.25)
+    assert p.pma_weeks == pytest.approx(36.0 + 29 / 7)
+
+
+def test_birthdate_gives_the_same_fit_as_the_age_it_implies():
+    by_age = vd.evaluate(_request(options={"model": "le2013", "series": False}))
+    req = _request(options={"model": "le2013", "series": False})
+    days = vd.age_from_birthdate("2019-03-02", on="2026-03-02")["age_days"]
+    req["patient"] = {**req["patient"], "age_years": None}
+    del req["patient"]["age_years"]
+    req["patient"]["birthdate"] = "2019-03-02"
+    by_dob = vd.evaluate(req)
+    assert by_dob["patient"]["age_on"] == "2026-03-02"       # the first dose date
+    assert by_dob["patient"]["postnatal_age_days"] == days
+    assert by_dob["results"][0]["parameters"]["CL"] == pytest.approx(
+        vd.evaluate(_request(patient={**_request()["patient"], "age_years": None,
+                                      "postnatal_age_days": days},
+                             options={"model": "le2013", "series": False})
+                    )["results"][0]["parameters"]["CL"], rel=1e-9)
+    assert by_age["ok"] and by_dob["ok"]
+
+
+def test_birthdate_after_the_first_dose_is_reported_not_raised():
+    req = _request()
+    req["patient"] = {k: v for k, v in req["patient"].items() if k != "age_years"}
+    req["patient"]["birthdate"] = "2026-04-01"
+    resp = vd.evaluate(req)
+    assert resp["ok"] is False
+    assert "after" in resp["errors"][0]
+
+
+# ---------------------------------------------------------------- plotting grids
+def test_time_grid_contains_every_infusion_start_and_end():
+    from vankedoodle.pk import time_grid
+    doses = [vd.Dose(amount_mg=100, start_h=8.0 * i, duration_h=1.0) for i in range(3)]
+    g = time_grid(0.0, 20.0, doses, n_points=7)
+    for t in (0.0, 1.0, 8.0, 9.0, 16.0, 17.0):
+        assert t in g
+    assert np.all(np.diff(g) > 0)
+
+
+def test_series_reaches_the_true_peak():
+    entry = vd.evaluate(_request(options={"model": "smit2021", "series": True}))["results"][0]
+    s = entry["series"]
+    t = np.array(s["time_h"])
+    for end in (1.0, 9.0, 17.0, 25.0, 33.0):            # each infusion end
+        assert end in t
+
+
+def test_forecast_starts_when_the_next_dose_is_due():
+    entry = _uncertain(candidate_regimen={"dose_mg": 600, "interval_h": 12})["results"][0]
+    f = entry["forecast"]
+    # given every 8 h, last dose at 32 h: the switch happens at 40 h, not 32 + 12
+    assert f["next_dose_h"] == pytest.approx(40.0)
+    assert f["dose_times_h"][5] == pytest.approx(40.0)
+    assert f["dose_times_h"][6] == pytest.approx(52.0)
+
+
+# ---------------------------------------------------------------- continuous infusion
+def test_continuous_infusion_targets_the_auc_and_runs_all_day():
+    entry = _uncertain(continuous_infusion=True)["results"][0]
+    ci = entry["continuous_infusion"]
+    assert ci["continuous"] is True
+    assert ci["interval_h"] == 24.0 and ci["infusion_h"] == 24.0
+    assert ci["dose_mg"] == pytest.approx(500.0 * entry["parameters"]["CL"], abs=25.0)
+    assert ci["auc24"] == pytest.approx(500.0, rel=0.03)
+    # no peaks: by day 3 the end-of-day concentration is near AUC24 / 24
+    assert ci["cmax"] == pytest.approx(ci["auc24"] / 24.0, rel=0.25)
+    assert not any("trough" in f for f in ci["flags"])
+    assert ci["distribution"]["prob_peak_above"] == 0.0
+
+
+def test_continuous_infusion_is_off_by_default():
+    assert _uncertain()["results"][0]["continuous_infusion"] is None
+
+
+def test_a_candidate_infusion_filling_its_interval_is_continuous():
+    c = _uncertain(candidate_regimen={"dose_mg": 1300, "interval_h": 24,
+                                      "infusion_h": 24})["results"][0]["candidate"]
+    assert c["continuous"] is True and c["infusion_h"] == 24.0
+    short = _uncertain(candidate_regimen={"dose_mg": 450, "interval_h": 8,
+                                          "infusion_h": 1})["results"][0]["candidate"]
+    assert short["continuous"] is False
+
+
+# ---------------------------------------------------------------- posterior sampling
+def _single_trough_fit(model="smit2021"):
+    from vankedoodle import bayes
+    req = _request()
+    hist = vd.api._build_history(req)
+    pat = vd.api._build_patient(req["patient"], hist.origin)
+    lv = req["levels"][0]
+    level = vd.Level(time_h=vd.to_hours(lv["time"], hist.origin) if isinstance(lv["time"], str)
+                     else float(lv["time"]), conc_mg_l=lv["conc_mg_l"])
+    return bayes.fit(pat, hist.doses, [level], model=model)
+
+
+def _grid_auc_quantiles(fit, tdd, qs=(0.05, 0.5, 0.95), n=160, width=6.0):
+    """The exact posterior of AUC24 by brute-force integration over a 2-D eta grid:
+    no sampling and no normal approximation, so an independent reference."""
+    sd = np.sqrt(np.diag(fit.eta_covariance))
+    axes = [np.linspace(m - width * s, m + width * s, n) for m, s in zip(fit.eta, sd)]
+    g1, g2 = np.meshgrid(*axes, indexing="ij")
+    etas = np.column_stack([g1.ravel(), g2.ravel()])
+    logp = -0.5 * np.array([fit._objective(e) for e in etas])
+    w = np.exp(logp - logp.max())
+    w /= w.sum()
+    auc = tdd / np.array([fit.model.individual(fit.patient, e)["CL"] for e in etas])
+    order = np.argsort(auc)
+    cum = np.cumsum(w[order])
+    return [float(auc[order][np.searchsorted(cum, q)]) for q in qs]
+
+
+def test_auc_interval_matches_the_exact_posterior():
+    fit = _single_trough_fit()
+    assert fit.posterior_method == "importance sampling"
+    tdd = 1350.0
+    lo, med, hi = _grid_auc_quantiles(fit, tdd)
+    exp = vd.predict_exposure(fit, 450.0, 8.0, 1.0)
+    assert exp.auc24_ci[0] == pytest.approx(lo, rel=0.03)
+    assert exp.auc24_ci[1] == pytest.approx(hi, rel=0.03)
+    assert exp.auc24 == pytest.approx(med, rel=0.03)        # MAP ~ posterior median
+
+
+def test_the_normal_approximation_alone_would_bias_the_interval_low():
+    """Why sampling is needed: with one trough, symmetric normal draws put the
+    lower bound well below the exact one."""
+    fit = _single_trough_fit()
+    lo, _, _ = _grid_auc_quantiles(fit, 1350.0)
+    normal = np.random.default_rng(0).multivariate_normal(fit.eta, fit.eta_covariance, 4000)
+    auc = 1350.0 / np.array([fit.model.individual(fit.patient, e)["CL"] for e in normal])
+    assert np.percentile(auc, 5) < 0.9 * lo
+    assert vd.predict_exposure(fit, 450.0, 8.0, 1.0).auc24_ci[0] > 0.97 * lo
+
+
+def test_prior_only_fits_use_the_exact_normal_prior():
+    resp = vd.evaluate(_request(levels=[], options={"model": "smit2021", "series": False}))
+    e = resp["results"][0]
+    assert e["posterior_method"] == "prior" and e["posterior_ess"] is None
+
+
+def test_posterior_draws_are_reproducible():
+    a = vd.evaluate(_request(options={"model": "smit2021", "series": False}))
+    b = vd.evaluate(_request(options={"model": "smit2021", "series": False}))
+    assert a["results"][0]["current"]["auc24_ci"] == b["results"][0]["current"]["auc24_ci"]
+    assert a["results"][0]["posterior_method"] == "importance sampling"
+    assert a["results"][0]["posterior_ess"] > 1000
+
+
+def test_unreliable_weights_fall_back_to_the_normal_approximation(monkeypatch):
+    from vankedoodle import bayes
+    monkeypatch.setattr(bayes, "MIN_EFFECTIVE_DRAWS", 10 ** 9)
+    fit = _single_trough_fit()
+    exp = vd.predict_exposure(fit, 450.0, 8.0, 1.0)
+    assert fit.posterior_method == "normal approximation"
+    assert exp.auc24_ci is not None
+    assert any("could not be sampled reliably" in w for w in fit.warnings)
+
+
+def test_objective_is_finite_far_from_the_mode():
+    fit = _single_trough_fit()
+    for eta in ([8.0, -8.0], [-8.0, 8.0], [20.0, 20.0]):
+        assert np.isfinite(fit._objective(np.array(eta)))
+
+
+def test_history_curves_run_until_the_next_dose_is_due():
+    s = vd.evaluate(_request(options={"model": "smit2021", "series": True}))["results"][0]["series"]
+    # last dose at 32 h, every 8 h: the curves carry on to 40 h
+    assert s["time_h"][-1] == pytest.approx(40.0)
