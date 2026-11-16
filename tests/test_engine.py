@@ -1376,3 +1376,26 @@ def test_api_and_case_record_carry_the_implausible_flag():
     good = vd.evaluate(req)
     assert good["results"][0]["implausible_fit"] is False
     assert vd.case_record(good)["implausible_fit"] is False
+
+
+def test_closed_form_solver_matches_the_event_by_event_solver():
+    """The superposition path (used for every fit) must agree with the exact
+    event-by-event propagation on irregular histories: boluses, overlapping and
+    back-to-back infusions, and times before, inside and exactly at dose events."""
+    from vankedoodle.core import Dose
+    rng = np.random.default_rng(42)
+    for k in range(150):
+        if k % 3:
+            m = vd.CompartmentalModel.two_compartment(*rng.uniform([0.2, 2, 0.3, 2], [10, 60, 8, 150]))
+        else:
+            m = vd.CompartmentalModel.one_compartment(*rng.uniform([0.2, 2], [10, 60]))
+        n = int(rng.integers(1, 25))
+        starts = np.sort(rng.uniform(0, 150, n))
+        doses = [Dose(float(rng.uniform(5, 1500)), float(s), float(rng.choice([0, 0.5, 1, 2, 24])))
+                 for s in starts]
+        times = np.concatenate([rng.uniform(-5, 200, 15),
+                                [d.start_h for d in doses], [d.end_h for d in doses]])
+        c_ref, a_ref = m._step(sorted(doses, key=lambda d: d.start_h), times, None)
+        c, a = m.simulate(doses, times)
+        assert np.allclose(c, c_ref, rtol=1e-7, atol=1e-9 * max(1.0, np.max(np.abs(c_ref))))
+        assert np.allclose(a, a_ref, rtol=1e-7, atol=1e-9 * max(1.0, np.max(np.abs(a_ref))))

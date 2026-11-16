@@ -36,6 +36,7 @@ class CompartmentalModel:
         self.n_states = self._A.shape[0]            # includes the AUC state
         self.n_compartments = self.n_states - 1
         self._cache: Dict[float, Tuple[np.ndarray, np.ndarray]] = {}
+        self._eig = None                            # eigen-decomposition, lazily
 
     # -- constructors ---------------------------------------------------
     @staticmethod
@@ -93,6 +94,68 @@ class CompartmentalModel:
         doses = sorted(doses, key=lambda d: d.start_h)
         if times.size == 0:
             return np.empty(0), np.empty(0)
+        if initial_state is None:
+            fast = self._superpose(doses, times)
+            if fast is not None:
+                return fast
+        return self._step(doses, times, initial_state)
+
+    # -- closed form ----------------------------------------------------
+    def _eigen(self):
+        """A = V diag(lam) V^-1, or None when that is not numerically safe."""
+        if self._eig is None:
+            lam, V = np.linalg.eig(self._A)
+            ok = np.all(np.abs(np.imag(lam)) <= 1e-12 * max(1.0, np.max(np.abs(lam))))
+            if ok:
+                lam, V = np.real(lam), np.real(V)
+                lam = np.where(np.abs(lam) <= 1e-12 * max(1.0, np.max(np.abs(lam))), 0.0, lam)
+                ok = np.linalg.cond(V) < 1e8
+            if ok:
+                Vinv = np.linalg.inv(V)
+                self._eig = (lam, V, Vinv @ np.eye(self.n_states)[:, 0])
+            else:
+                self._eig = False
+        return self._eig or None
+
+    def _superpose(self, doses, times):
+        """Concentrations and cumulative AUC as a sum of each dose's own exact
+        response. The model is linear and time-invariant, so the state at time t
+        is sum_d V diag(g_d(t)) V^-1 b, with g the integral of exp(lam (t - tau))
+        over the part of dose d's infusion that has happened by t. One vectorised
+        evaluation replaces the event-by-event matrix exponentials, which matters
+        for irregular histories where no two intervals share a propagator."""
+        eig = self._eigen()
+        if eig is None:
+            return None
+        lam, V, w = eig
+        if not doses:
+            return np.zeros(times.shape), np.zeros(times.shape)
+        s = np.array([d.start_h for d in doses])
+        dur = np.array([d.duration_h for d in doses])
+        amt = np.array([d.amount_mg for d in doses])
+        t = times[:, None]                                         # (T, 1)
+        bolus = dur <= 0
+        e = s + dur
+        m = np.minimum(t, e)                                       # end of infused part
+        given = np.clip(m - s, 0.0, None)                          # (T, D) hours infused so far
+        started = t >= s - 1e-12
+        L = lam[None, None, :]                                     # (1, 1, n)
+        nz = L != 0.0
+        safeL = np.where(nz, L, 1.0)
+        lag = (t - m)[..., None]                                   # time since infusion stopped
+        with np.errstate(over="ignore", invalid="ignore"):
+            g_inf = np.where(nz, np.exp(L * lag) * np.expm1(L * given[..., None]) / safeL,
+                             given[..., None])
+            g_inf = g_inf * np.where(bolus, 0.0, amt / np.where(bolus, 1.0, dur))[None, :, None]
+            g_bol = np.where(nz, np.exp(L * (t - s)[..., None]), 1.0) * np.where(bolus, amt, 0.0)[None, :, None]
+        g = np.where(started[..., None], g_inf + g_bol, 0.0).sum(axis=1)   # (T, n)
+        state = (g * w[None, :]) @ V.T                             # (T, n_states)
+        if not np.all(np.isfinite(state)):
+            return None
+        return state[:, 0] / self.V1, state[:, -1]
+
+    # -- event-by-event (reference, and for a non-zero initial state) ------
+    def _step(self, doses, times, initial_state):
         n = self.n_states
 
         events = [d.start_h for d in doses] + [d.end_h for d in doses]
