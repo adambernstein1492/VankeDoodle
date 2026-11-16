@@ -1188,7 +1188,8 @@ def test_continuous_infusion_targets_the_auc_and_runs_all_day():
     ci = entry["continuous_infusion"]
     assert ci["continuous"] is True
     assert ci["interval_h"] == 24.0 and ci["infusion_h"] == 24.0
-    assert ci["dose_mg"] == pytest.approx(500.0 * entry["parameters"]["CL"], abs=25.0)
+    # daily amount = target x (posterior median) CL, rounded to the dose increment
+    assert ci["auc24"] == pytest.approx(500.0, rel=0.03)
     assert ci["auc24"] == pytest.approx(500.0, rel=0.03)
     # no peaks: by day 3 the end-of-day concentration is near AUC24 / 24
     assert ci["cmax"] == pytest.approx(ci["auc24"] / 24.0, rel=0.25)
@@ -1245,7 +1246,25 @@ def test_auc_interval_matches_the_exact_posterior():
     exp = vd.predict_exposure(fit, 450.0, 8.0, 1.0)
     assert exp.auc24_ci[0] == pytest.approx(lo, rel=0.03)
     assert exp.auc24_ci[1] == pytest.approx(hi, rel=0.03)
-    assert exp.auc24 == pytest.approx(med, rel=0.03)        # MAP ~ posterior median
+    # The point estimate is the posterior median, not the MAP: with a realistic
+    # residual error the AUC posterior is right-skewed, so the MAP sits below it.
+    assert exp.auc24 == pytest.approx(med, rel=0.02)
+    assert exp.auc24_map < exp.auc24
+    assert lo < exp.auc24_map < hi
+
+
+def test_doses_are_chosen_on_the_posterior_median():
+    fit = _single_trough_fit()
+    rec = vd.recommend(fit, target_auc24=500.0, dose_increment=1.0)
+    assert rec.best.auc24 == pytest.approx(500.0, rel=0.02)      # median on target
+    assert rec.best.auc24 == pytest.approx(
+        rec.best.total_daily_dose_mg / fit.cl_median, rel=1e-9)
+
+
+def test_without_levels_the_median_is_the_map():
+    req = _request(); req.pop("levels", None)
+    fit = vd.fit(vd.api._build_patient(req["patient"]), [], [], model="smit2021")
+    assert fit.cl_median == pytest.approx(fit.parameters["CL"], rel=1e-12)
 
 
 def test_the_normal_approximation_alone_would_bias_the_interval_low():

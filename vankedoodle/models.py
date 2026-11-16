@@ -152,7 +152,11 @@ SMIT2021 = PopPKModel(
     eta_params=("CL", "V2"),
     omega=np.array([[cv_to_omega2(0.287), -0.085],
                     [-0.085, cv_to_omega2(1.10)]], dtype=float),
-    sigma_prop=0.0789,
+    # The published model's error is $SIGMA 0.0788 on ln(concentration) in the
+    # NONMEM control stream (ESM1): a VARIANCE, so the SD is sqrt(0.0788) = 0.281.
+    # Using 0.0789 as the SD trusted each level ~13x too much; in simulation, 90%
+    # AUC intervals then covered the truth only ~50% of the time (91-92% with 0.281).
+    sigma_prop=math.sqrt(0.0788),
     required=("weight_kg", "crcl"),
     covariate_ranges={"age_years": (1.0, 18.0), "weight_kg": (5.8, 188.0),
                       "crcl": (8.6, 120.0)},
@@ -162,7 +166,8 @@ SMIT2021 = PopPKModel(
            "V2 scale linearly with weight and Q with exponent 0.599. Between-subject "
            "variability was estimated on CL (28.7% CV) and V2 (110% CV) with "
            "covariance -0.085; CVs are read on the sqrt(exp(omega^2)-1) scale. "
-           "Residual error proportional, 7.89%. 1892 children, 5524 samples."),
+           "Residual error 28.1% (log-domain variance 0.0788, applied here as a "
+           "proportional SD). 1892 children, 5524 samples."),
 )
 
 

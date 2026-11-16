@@ -354,7 +354,9 @@ def two_level_table(response: Mapping, model: Optional[str] = None) -> Optional[
     def diff(bayes, ref):
         return f"{100.0 * (bayes - ref) / ref:+.1f}%"
 
-    auc_b, cl_b = entry["current"]["auc24"], entry["parameters"]["CL"]
+    # both at the posterior median, so the two rows agree (AUC24 = daily dose / CL)
+    auc_b = entry["current"]["auc24"]
+    cl_b = entry["current"]["total_daily_dose_mg"] / auc_b
     vol = f"{sz['volume_l']:.1f} L"
     if weight:
         vol += f" ({sz['volume_l'] / weight:.2f} L/kg)"

@@ -286,8 +286,13 @@ random effects: the population model supplies the prior, the measured levels
 supply a proportional-error likelihood, and the posterior mode gives the
 patient's own parameters. With no levels the result is exactly the population
 prediction; each level moves it toward the individual. A Laplace approximation
-at the mode gives the posterior covariance, which is where the 90 % AUC interval
-and the probability of being in target come from. As in any MAP estimator with a
+at the mode starts an adaptive importance sampler that draws from the exact
+posterior; those draws give the 90 % AUC interval and the probability of being in
+target. The AUC₂₄ shown, and the doses chosen to hit the target, use the
+**posterior median** clearance rather than the mode: once levels are fitted the
+posterior is skewed, and the median sits in the middle of the interval it is
+reported with (the MAP value is still returned as `auc24_map`). The concentration
+curves are drawn with the MAP parameters. As in any MAP estimator with a
 proportional error model, the objective carries a log-variance term that biases
 the mode slightly toward higher clearance; the effect scales with the model's
 residual error and is a few percent for a model with 29 % proportional error.
@@ -336,6 +341,13 @@ Dosing the Smit paper's own Table III guideline through this engine reproduces i
 simulated day-3 exposures: AUC₂₄ 400–623 mg·h/L across all weight and renal
 strata the paper displays (35/35 inside its stated 400–700 window) and troughs
 7.4–23.9 mg/L against the paper's 7.2–23.
+
+Panel (a) predates the residual-error fix of 15 Nov 2026. It was simulated with
+Smit's error taken as 7.9 % (both in the virtual patients and in the estimator),
+so its MAPEs are optimistic. With the published error (log-domain variance 0.0788,
+SD 28 %), simulations put a single early level at about 20 % MAPE and a
+steady-state pair at about 14 %, and the 90 % AUC₂₄ intervals contain the true
+value 91–92 % of the time (about 50 % before the fix).
 
 Those virtual subjects are a test of the estimator, not clinical evidence. They
 say nothing about performance in real patients — that is what the prospective

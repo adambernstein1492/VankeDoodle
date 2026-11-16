@@ -192,6 +192,26 @@ class MAPFit:
         draws, w, _ = pool
         return draws[rng.choice(len(w), size=int(n), replace=True, p=w)]
 
+    @property
+    def cl_median(self) -> float:
+        """Posterior median of clearance: the point estimate behind AUC24 and doses.
+
+        AUC24 = daily dose / CL falls as CL rises, so the median AUC24 is exactly
+        daily dose / median CL. Once levels are fitted the posterior of CL is
+        skewed and its median differs from the MAP value (the single most probable
+        CL); the median sits in the middle of the reported interval, so that is
+        the number shown. Without levels the posterior is the log-normal prior,
+        whose median is the MAP value.
+        """
+        pool = self._posterior_pool()
+        if pool is None:
+            return float(self.parameters["CL"])
+        draws, w, _ = pool
+        cls = np.array([self.model.individual(self.patient, e)["CL"] for e in draws])
+        order = np.argsort(cls)
+        cum = np.cumsum(w[order])
+        return float(cls[order][np.searchsorted(cum, 0.5)])
+
     def parameter_samples(self, n: int = 2000, seed: Optional[int] = 0) -> list:
         return [self.model.individual(self.patient, e)
                 for e in self.sample_etas(n=n, seed=seed)]

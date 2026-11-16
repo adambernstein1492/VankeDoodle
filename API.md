@@ -177,6 +177,11 @@ Each model entry additionally carries:
 | `parameter_uncertainty` | per parameter with variability: `prior_cv_pct`, `posterior_cv_pct` |
 | `steady_state_interval` | one interval of the current regimen on the evaluation day: `time_into_interval_h`, `conc` |
 
+`auc24` in every exposure (current, recommendation, candidate, alternatives) is
+the posterior median, daily dose / median CL, and doses are chosen so that median
+lands on target; `auc24_map` is the same quantity at the MAP clearance, which sits
+lower once the posterior is skewed.
+
 Posterior draws come from adaptive importance sampling: proposals around the MAP
 estimate are weighted by the exact posterior, so intervals and probabilities keep
 the posterior's real (often skewed) shape. Each model entry reports how:

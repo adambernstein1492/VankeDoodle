@@ -71,7 +71,8 @@ class Exposure:
     infusion_h: float
     total_daily_dose_mg: float
     mg_per_kg_per_day: float
-    auc24: float                 # steady-state AUC24 = total daily dose / CL
+    auc24: float                 # steady-state AUC24 = total daily dose / CL, at the
+                                 # posterior median CL (see MAPFit.cl_median)
     cmax: float                  # peak on the evaluation day
     ctrough: float               # trough on the evaluation day
     auc24_day: Optional[float] = None   # actual AUC over the evaluation day
@@ -82,6 +83,7 @@ class Exposure:
     prob_above_target: Optional[float] = None
     continuous: bool = False                   # a continuous infusion (no trough)
     flags: list = field(default_factory=list)
+    auc24_map: Optional[float] = None   # AUC24 at the MAP CL (the most probable CL)
 
     def as_dict(self) -> Dict[str, object]:
         d = {k: v for k, v in self.__dict__.items()}
@@ -125,8 +127,10 @@ def predict_exposure(source, dose_mg: float, interval_h: float,
     if isinstance(source, MAPFit):
         pars = source.parameters
         weight_kg = weight_kg or source.patient.weight_kg
+        point_cl = source.cl_median
     else:
         pars = dict(source)
+        point_cl = float(pars["CL"])
     pk = model_from_params(pars)
 
     if continuous:
@@ -137,7 +141,8 @@ def predict_exposure(source, dose_mg: float, interval_h: float,
         infusion_h = max(0.5, interval_h - 0.5)
 
     tdd = dose_mg * 24.0 / interval_h
-    auc24 = pk.auc24_steady_state(tdd)
+    auc24 = tdd / point_cl                      # posterior median AUC24
+    auc24_map = pk.auc24_steady_state(tdd)      # = tdd / MAP CL
 
     doses, t0, t1 = _regimen_doses(dose_mg, interval_h, infusion_h, day)
     grid = np.linspace(t0, t1, 241)
@@ -175,7 +180,8 @@ def predict_exposure(source, dose_mg: float, interval_h: float,
                     auc24_day=float(auc24_day), day=int(day),
                     auc24_ci=auc_ci, prob_in_target=p_target,
                     prob_below_target=p_below, prob_above_target=p_above,
-                    continuous=bool(continuous), flags=flags)
+                    continuous=bool(continuous), flags=flags,
+                    auc24_map=float(auc24_map))
 
 
 @dataclass
@@ -232,7 +238,7 @@ def recommend(source,
     institutional ceilings, not model outputs; override them to match local policy.
     """
     if isinstance(source, MAPFit):
-        cl = source.parameters["CL"]
+        cl = source.cl_median
         wt = weight_kg or source.patient.weight_kg
         basis = ("individual (Bayesian MAP, "
                  f"{len(source.levels)} level{'s' if len(source.levels) != 1 else ''})"
@@ -299,7 +305,7 @@ def continuous_infusion(source, target_auc24: float = AUC_TARGET,
     included.
     """
     if isinstance(source, MAPFit):
-        cl = source.parameters["CL"]
+        cl = source.cl_median
         wt = weight_kg or source.patient.weight_kg
     else:
         cl = float(dict(source)["CL"])
