@@ -954,13 +954,13 @@ def test_two_level_detection_explains_why_it_cannot_run():
     assert one["ok"] is True                       # the Bayesian result still stands
     assert one["results"][0]["current"]["auc24"] > 0
 
-    # two levels, but in different dosing intervals
+    # two levels after different doses, but at the same time after each
     split = vd.evaluate(_request(levels=[{"time": 7.5, "conc_mg_l": 9.0},
                                          {"time": 15.5, "conc_mg_l": 8.6}],
                                  regimen={"dose_mg": 450, "interval_h": 8, "n_doses": 5,
                                           "infusion_h": 1.0, "start": 0.0}))
     assert split["sawchuk_zaske"]["available"] is False
-    assert "same dosing interval" in split["sawchuk_zaske"]["reason"]
+    assert "same time after" in split["sawchuk_zaske"]["reason"]
 
     # two levels in one interval, but the first is drawn during the infusion
     during = vd.evaluate(_request(levels=[{"time": 24.5, "conc_mg_l": 28.0},
@@ -968,7 +968,7 @@ def test_two_level_detection_explains_why_it_cannot_run():
                                   regimen={"dose_mg": 450, "interval_h": 8, "n_doses": 5,
                                            "infusion_h": 1.0, "start": 0.0}))
     assert during["sawchuk_zaske"]["available"] is False
-    assert "end of the" in during["sawchuk_zaske"]["reason"]
+    assert "infusion ended" in during["sawchuk_zaske"]["reason"]
 
 
 def test_two_level_result_matches_the_direct_call():
@@ -1414,3 +1414,55 @@ def test_current_interval_ignores_a_supplemental_dose():
     assert _observed_interval(h) == 10.0
     h = vd.DosingHistory([vd.Dose(300, 0.0, 1.0)])
     assert _observed_interval(h) == 24.0
+
+
+# ------------------------------------------- two-level pairs across two doses
+def _one_cmt_steady_state_case(dose_mg=500.0, tau=8.0, inf=1.0, cl=3.0, v=20.0, n=8):
+    pk = vd.CompartmentalModel.one_compartment(cl, v)
+    doses = [vd.Dose(dose_mg, tau * i, inf) for i in range(n)]
+    return pk, doses
+
+
+def test_two_level_trough_before_and_peak_after_the_same_dose_is_exact():
+    """A pre-dose trough (end of interval N-1) and a post-infusion peak (interval
+    N) of identical doses, placed in one interval: exact for a one-compartment
+    patient at steady state."""
+    from vankedoodle.reference import two_level_from_history
+    pk, doses = _one_cmt_steady_state_case()
+    t_trough, t_peak = 8.0 * 7 - 0.25, 8.0 * 7 + 2.0
+    c = pk.concentrations(doses, [t_trough, t_peak])
+    levels = [vd.Level(t_trough, float(c[0])), vd.Level(t_peak, float(c[1]))]
+    sz = two_level_from_history(doses, levels, interval_h=8.0)
+    assert sz["available"] and sz["extrapolated"]
+    assert sz["ke"] == pytest.approx(3.0 / 20.0, rel=1e-3)
+    assert sz["auc24"] == pytest.approx(500.0 * 3 / 3.0, rel=2e-3)   # TDD / CL
+    assert [round(l["hours_into_interval"], 2) for l in sz["levels_used"]] == [2.0, 7.75]
+
+
+def test_two_level_refuses_pairs_from_different_doses():
+    from vankedoodle.reference import two_level_from_history
+    pk, doses = _one_cmt_steady_state_case()
+    doses[-1] = vd.Dose(750.0, doses[-1].start_h, 1.0)                # dose N changed
+    t_trough, t_peak = 8.0 * 7 - 0.25, 8.0 * 7 + 2.0
+    c = pk.concentrations(doses, [t_trough, t_peak])
+    sz = two_level_from_history(doses, [vd.Level(t_trough, float(c[0])),
+                                        vd.Level(t_peak, float(c[1]))], interval_h=8.0)
+    assert not sz["available"]
+    assert "not all the same" in sz["reason"]
+    doses[-1] = vd.Dose(500.0, doses[-1].start_h, 2.0)                # longer infusion
+    sz = two_level_from_history(doses, [vd.Level(t_trough, 5.0), vd.Level(t_peak, 20.0)],
+                                interval_h=8.0)
+    assert not sz["available"] and "not all the same" in sz["reason"]
+
+
+def test_two_level_falls_back_to_an_earlier_same_interval_pair():
+    from vankedoodle.reference import two_level_from_history
+    pk, doses = _one_cmt_steady_state_case()
+    doses[-1] = vd.Dose(750.0, doses[-1].start_h, 1.0)
+    times = [8.0 * 5 + 2.0, 8.0 * 5 + 7.0, 8.0 * 7 - 0.25, 8.0 * 7 + 2.0]
+    c = pk.concentrations(doses, times)
+    sz = two_level_from_history(doses, [vd.Level(t, float(x)) for t, x in zip(times, c)],
+                                interval_h=8.0)
+    assert sz["available"] and not sz["extrapolated"]
+    assert "could not be used" in sz["note"]
+    assert sz["auc24"] == pytest.approx(500.0 * 3 / 3.0, rel=5e-3)   # dose 5: 99.75% of steady state

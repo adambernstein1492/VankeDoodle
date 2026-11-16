@@ -782,12 +782,7 @@ if sz["available"]:
         fig = charts.compartment_figure(response)
         if fig is not None:
             st.plotly_chart(fig, width="stretch")
-        first, second = sz["levels_used"][0], sz["levels_used"][1]
-        st.caption(
-            f"Using the {first['conc_mg_l']:.1f} mg/L level at "
-            f"{first['hours_into_interval']:.1f} h and the {second['conc_mg_l']:.1f} mg/L "
-            f"level at {second['hours_into_interval']:.1f} h into a {sz['interval_h']:g} h "
-            f"interval. Cmax {sz['cmax']:.1f}, Cmin {sz['cmin']:.1f} mg/L.")
+        st.caption(charts.two_level_caption(response))
     with table_col:
         st.dataframe(charts.two_level_table(response), hide_index=True, width="content")
         st.caption("Difference: the Bayesian value relative to the two-level one.")

@@ -320,7 +320,11 @@ models with a slowly-equilibrating compartment, where day-3 exposure is
 measurably below the eventual steady state.
 
 **Reference method.** `sawchuk_zaske()` implements the two-level steady-state
-calculation used as the current standard of care, and `mpe_mape()` computes the
+calculation used as the current standard of care. From a case it uses the two
+most recent levels, each timed from the dose it follows; a trough drawn before
+dose N and a peak after it are placed in one interval when every dose from one to
+the other was the same amount over the same infusion at the regimen's interval
+(steady state), and refused with the reason otherwise. `mpe_mape()` computes the
 bias and precision statistics named in the protocol — so the Aim 1 comparison is
 a few lines of code against the same objects.
 
@@ -353,7 +357,7 @@ Those virtual subjects are a test of the estimator, not clinical evidence. They
 say nothing about performance in real patients — that is what the prospective
 study is for.
 
-`pytest` runs 169 tests covering: the published typical parameter values and every
+`pytest` runs 178 tests covering: the published typical parameter values and every
 covariate term of all six models, reproduced at covariate values where each term
 reduces to a known constant; each maturation function equalling 0.5 at its own
 midpoint; Colin's clearance reaching 90 % of adult by 2 years PMA and its published

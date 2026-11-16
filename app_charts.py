@@ -122,6 +122,28 @@ def _when(response: Mapping, hours: float) -> str:
     return (pd.Timestamp(origin) + pd.Timedelta(hours=float(hours))).strftime("%b %d %H:%M")
 
 
+def two_level_caption(response: Mapping) -> str:
+    """Which levels the two-level calculation used, and how, in one or two sentences."""
+    sz = response["sawchuk_zaske"]
+    first, second = sz["levels_used"][0], sz["levels_used"][1]
+    text = (f"Using the {first['conc_mg_l']:.1f} mg/L level at "
+            f"{first['hours_into_interval']:.1f} h and the {second['conc_mg_l']:.1f} mg/L "
+            f"level at {second['hours_into_interval']:.1f} h into a {sz['interval_h']:g} h "
+            f"interval. Cmax {sz['cmax']:.1f}, Cmin {sz['cmin']:.1f} mg/L.")
+    if sz.get("extrapolated"):
+        by_time = sorted(sz["levels_used"], key=lambda l: l["time_h"])
+        doses = sorted(sz["doses_used"], key=lambda d: d["time_h"])
+        text += (f" The {by_time[0]['conc_mg_l']:.1f} mg/L level ({_when(response, by_time[0]['time_h'])})"
+                 f" followed the dose at {_when(response, doses[0]['time_h'])} and the "
+                 f"{by_time[1]['conc_mg_l']:.1f} mg/L level followed the dose at "
+                 f"{_when(response, doses[1]['time_h'])}. Both doses, and any between them, were "
+                 f"{sz['dose_mg']:g} mg over {sz['infusion_h']:g} h, so both are placed in one "
+                 f"interval, assuming steady state.")
+    if sz.get("note"):
+        text += " " + sz["note"]
+    return text
+
+
 def given_regimen_summary(response: Mapping) -> str:
     """The doses actually given, in one phrase."""
     doses = sorted(response["regimen_given"]["doses"], key=lambda d: d["time_h"])

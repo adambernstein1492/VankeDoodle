@@ -91,17 +91,113 @@ def mpe_mape(reference, test) -> Dict[str, float]:
             "percent_errors": pe}
 
 
+def _same_dose(a, b) -> bool:
+    """Same amount and the same infusion length (to the precision charted)."""
+    return (abs(a.amount_mg - b.amount_mg) <= max(0.5, 0.01 * a.amount_mg)
+            and abs(a.duration_h - b.duration_h) <= 0.05)
+
+
+def _own_dose(doses: Sequence, t: float) -> Optional[int]:
+    """Index of the dose a level drawn at ``t`` follows: the last one started by then."""
+    idx = None
+    for i, d in enumerate(doses):
+        if d.start_h <= t + 1e-9:
+            idx = i
+    return idx
+
+
+def _pair_result(dose, tau, first, t1, last, t2, extra=None) -> Dict[str, object]:
+    result = sawchuk_zaske(dose_mg=dose.amount_mg, interval_h=tau,
+                           infusion_h=dose.duration_h,
+                           t1_h=t1, c1_mg_l=first.conc_mg_l,
+                           t2_h=t2, c2_mg_l=last.conc_mg_l)
+    out = {"available": True, "reason": None, "extrapolated": False,
+           "dose_mg": dose.amount_mg, "interval_h": tau,
+           "infusion_h": dose.duration_h,
+           "levels_used": [{"time_h": first.time_h, "hours_into_interval": t1,
+                            "conc_mg_l": first.conc_mg_l},
+                           {"time_h": last.time_h, "hours_into_interval": t2,
+                            "conc_mg_l": last.conc_mg_l}]}
+    out.update(extra or {})
+    out.update(result.as_dict())
+    return out
+
+
+def _most_recent_pair(doses, levels, tau_regimen) -> Dict[str, object]:
+    """Sawchuk-Zaske on the two most recent levels, placed in one interval.
+
+    Each level is timed from the dose it follows. When both follow the same dose
+    this is the classic same-interval calculation. When they follow different
+    doses (typically a trough drawn just before dose N and a peak after it), the
+    two are placed in one interval of the current regimen, which is valid at
+    steady state only if every dose from the earlier one to the later one is the
+    same amount over the same infusion, given at that interval. Those conditions
+    are checked; any failure is returned as a reason, not silently ignored.
+    """
+    a, b = levels[-2], levels[-1]
+    ia, ib = _own_dose(doses, a.time_h), _own_dose(doses, b.time_h)
+    if ia is None or ib is None:
+        return {"available": False,
+                "reason": "One of the two most recent levels was drawn before the first dose."}
+    placed = sorted([(a.time_h - doses[ia].start_h, a, ia), (b.time_h - doses[ib].start_h, b, ib)],
+                    key=lambda x: x[0])
+    (t1, first, i1), (t2, last, i2) = placed
+    if ia == ib:
+        dose = doses[ia]
+        nxt = doses[ia + 1].start_h - dose.start_h if ia + 1 < len(doses) else tau_regimen
+        tau, extra = nxt, {}
+    else:
+        lo, hi = min(ia, ib), max(ia, ib)
+        run = doses[lo:hi + 1]
+        if not all(_same_dose(run[0], d) for d in run[1:]):
+            amounts = sorted({f"{d.amount_mg:g} mg over {d.duration_h:g} h" for d in run})
+            return {"available": False,
+                    "reason": ("The two most recent levels follow different doses, and the "
+                               "doses between them were not all the same ("
+                               + ", ".join(amounts) + "), so they cannot be placed in one "
+                               "steady-state interval.")}
+        gaps = [q.start_h - p.start_h for p, q in zip(run[:-1], run[1:])]
+        if any(abs(g - tau_regimen) > 0.25 * tau_regimen for g in gaps):
+            return {"available": False,
+                    "reason": (f"The two most recent levels follow different doses, but those "
+                               f"doses were not given every {tau_regimen:g} h (gaps of "
+                               + ", ".join(f"{g:.1f}" for g in gaps)
+                               + " h), so they cannot be placed in one interval.")}
+        dose, tau = doses[ib], tau_regimen
+        extra = {"extrapolated": True,
+                 "doses_used": [{"time_h": doses[i].start_h, "amount_mg": doses[i].amount_mg,
+                                 "infusion_h": doses[i].duration_h} for i in (i1, i2)]}
+    if t1 < dose.duration_h:
+        return {"available": False,
+                "reason": ("Of the two most recent levels, the earlier one in the interval was "
+                           f"drawn {t1:.1f} h after its dose started, before the "
+                           f"{dose.duration_h:g} h infusion ended; the method needs both "
+                           "levels after the infusion.")}
+    if t2 - t1 < 0.5:
+        return {"available": False,
+                "reason": "The two most recent levels fall at almost the same time after "
+                          "their doses, so they cannot give an elimination rate."}
+    if last.conc_mg_l >= first.conc_mg_l:
+        return {"available": False,
+                "reason": ("Of the two most recent levels, the later one in the interval "
+                           f"({last.conc_mg_l:g} mg/L at {t2:.1f} h) is not lower than the "
+                           f"earlier one ({first.conc_mg_l:g} mg/L at {t1:.1f} h).")}
+    return _pair_result(dose, tau, first, t1, last, t2, extra)
+
+
 def two_level_from_history(doses: Sequence, levels: Sequence,
                            interval_h: Optional[float] = None) -> Dict[str, object]:
-    """Find a usable two-level pair in a dosing history and apply Sawchuk-Zaske.
+    """Two-level (Sawchuk-Zaske) AUC from a dosing history.
 
-    The method needs two concentrations drawn within one dosing interval, the
-    first after the end of that infusion.  This picks the most recent interval
-    that satisfies those conditions, so a front end can simply hand over the
-    whole case and be told either the result or why it cannot be computed.
+    Uses the two most recent levels. If they were drawn after different doses
+    (a trough before dose N, a peak after it), they are placed in one interval
+    when every dose between them is identical and given at the regimen's
+    interval (steady state). If the two most recent levels cannot be used, falls
+    back to the most recent dosing interval holding a usable pair, and says why.
 
     Returns a dict with ``available`` and, when False, a ``reason`` written for
-    a clinician rather than a programmer.
+    a clinician rather than a programmer. ``extrapolated`` marks a pair taken
+    from two different doses.
     """
     doses = sorted(doses, key=lambda d: d.start_h)
     levels = sorted(levels, key=lambda l: l.time_h)
@@ -114,43 +210,27 @@ def two_level_from_history(doses: Sequence, levels: Sequence,
 
     starts = [d.start_h for d in doses]
     gaps = [b - a for a, b in zip(starts[:-1], starts[1:]) if b > a]
-    default_tau = interval_h if interval_h else (min(gaps) if gaps else 24.0)
+    default_tau = interval_h if interval_h else (sorted(gaps)[len(gaps) // 2] if gaps else 24.0)
 
-    attempted = False
+    recent = _most_recent_pair(doses, levels, default_tau)
+    if recent["available"]:
+        return recent
+
+    # Fallback: the most recent single interval that holds a usable pair.
     for i in range(len(doses) - 1, -1, -1):
         dose = doses[i]
         tau = (starts[i + 1] - starts[i]) if i + 1 < len(doses) else default_tau
         window = [l for l in levels if dose.start_h <= l.time_h < dose.start_h + tau]
         if len(window) < 2:
             continue
-        attempted = True
         first, last = window[0], window[-1]
         t1 = first.time_h - dose.start_h
         t2 = last.time_h - dose.start_h
-        if t1 < dose.duration_h:
+        if t1 < dose.duration_h or last.conc_mg_l >= first.conc_mg_l:
             continue
-        if last.conc_mg_l >= first.conc_mg_l:
-            continue
-        result = sawchuk_zaske(dose_mg=dose.amount_mg, interval_h=tau,
-                               infusion_h=dose.duration_h,
-                               t1_h=t1, c1_mg_l=first.conc_mg_l,
-                               t2_h=t2, c2_mg_l=last.conc_mg_l)
-        out = {"available": True, "reason": None,
-               "dose_mg": dose.amount_mg, "interval_h": tau,
-               "infusion_h": dose.duration_h,
-               "levels_used": [{"time_h": first.time_h, "hours_into_interval": t1,
-                                "conc_mg_l": first.conc_mg_l},
-                               {"time_h": last.time_h, "hours_into_interval": t2,
-                                "conc_mg_l": last.conc_mg_l}]}
-        out.update(result.as_dict())
+        out = _pair_result(dose, tau, first, t1, last, t2)
+        out["note"] = ("The two most recent levels could not be used ("
+                       + recent["reason"].rstrip(".") + "); this uses an earlier "
+                       "pair from one dosing interval.")
         return out
-
-    if attempted:
-        return {"available": False,
-                "reason": "Two levels fall in the same dosing interval, but the pair is "
-                          "unusable: the first must be drawn after the end of the "
-                          "infusion and the second must be lower than the first."}
-    return {"available": False,
-            "reason": "No two levels fall within the same dosing interval. The "
-                      "two-level method needs both samples from one interval; the "
-                      "Bayesian estimate does not."}
+    return recent

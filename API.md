@@ -122,7 +122,7 @@ a model that cannot run is reported in its own entry rather than failing the req
   ],
 
   "sawchuk_zaske": {
-    "available": true, "reason": null,
+    "available": true, "reason": null, "extrapolated": false,
     "dose_mg": 450.0, "interval_h": 8.0, "infusion_h": 1.0,
     "levels_used": [{"time_h": 26.0, "hours_into_interval": 2.0, "conc_mg_l": 30.2},
                     {"time_h": 31.5, "hours_into_interval": 7.5, "conc_mg_l": 8.3}],
@@ -191,7 +191,11 @@ weights are unreliable), and `posterior_ess` is the effective number of draws.
 Draws are seeded, so the same request always gives the same numbers. Every
 curve's time grid includes each infusion start and end, so peaks are exact.
 `sawchuk_zaske.curve` (`time_into_interval_h`, `conc`) is always present when the
-two-level result is available.
+two-level result is available. The pair is the two most recent levels, each timed
+from the dose it follows. `extrapolated: true` means they followed two different
+(identical) doses and were placed in one interval assuming steady state; then
+`doses_used` lists those doses. `note`, when present, says the most recent pair
+was unusable and an earlier same-interval pair was used instead.
 
 ### Errors
 
