@@ -22,8 +22,9 @@ that a qualified clinician interprets.
 from ._version import __version__
 from .core import (Dose, DosingHistory, Level, Patient, age_from_birthdate, bedside_schwartz,
                    body_surface_area, schwartz_1976, schwartz_k, to_hours)
-from .models import (COLIN2019, DEFAULT_MODEL, FRYMOYER2014, LAMARRE2000, LE2013,
-                     MODELS, PopPKModel, SMIT2021, XU2026,
+from .models import (COLIN2019, DEFAULT_MODEL, FRYMOYER2014, HOLFORD2024,
+                     HOLFORD2024_JAFFE, LAMARRE2000, LE2013,
+                     MODELS, PopPKModel, SMIT2021, XU2026, make_holford2024,
                      cv_to_omega2, describe_models, get_model, omega_from_cv,
                      register_model)
 from .pk import (CompartmentalModel, OneCompartmentModel, TwoCompartmentModel,
@@ -48,7 +49,8 @@ __all__ = [
     "Patient", "age_from_birthdate", "Dose", "Level", "DosingHistory", "bedside_schwartz",
     "schwartz_1976", "schwartz_k", "body_surface_area", "to_hours",
     "PopPKModel", "MODELS", "DEFAULT_MODEL", "SMIT2021", "XU2026", "LE2013",
-    "LAMARRE2000", "COLIN2019", "FRYMOYER2014",
+    "LAMARRE2000", "COLIN2019", "FRYMOYER2014", "HOLFORD2024", "HOLFORD2024_JAFFE",
+    "make_holford2024",
     "get_model", "register_model", "describe_models", "cv_to_omega2", "omega_from_cv",
     "CompartmentalModel", "OneCompartmentModel", "TwoCompartmentModel",
     "model_from_params",

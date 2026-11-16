@@ -505,7 +505,7 @@ def test_one_compartment_model_recovers_a_known_individual():
 
 def test_compare_models_tabulates_every_model():
     rows = vd.compare_models(
-        {"weight_kg": 20, "age_years": 6, "height_cm": 115, "scr": 0.4},
+        {"weight_kg": 20, "age_years": 6, "height_cm": 115, "scr": 0.4, "sex": "M"},
         {"dose_mg": 300, "interval_h": 6, "n_doses": 5, "start": 0.0},
         levels=[(23.5, 9.0)])
     assert {r["model"] for r in rows} == set(vd.MODELS)
@@ -705,8 +705,8 @@ def test_neonatal_models_fit_and_recommend():
         assert 400 <= rec.best.auc24 <= 600
 
 
-def test_registry_now_spans_six_models_and_both_structures():
-    assert len(vd.MODELS) == 6
+def test_registry_spans_eight_models_and_both_structures():
+    assert len(vd.MODELS) == 8
     assert {vd.get_model(n).n_compartments for n in vd.MODELS} == {1, 2}
     rows = vd.compare_models(_neonate(), {"dose_mg": 45, "interval_h": 12, "n_doses": 5})
     assert {r["model"] for r in rows} == set(vd.MODELS)
@@ -1466,3 +1466,90 @@ def test_two_level_falls_back_to_an_earlier_same_interval_pair():
     assert sz["available"] and not sz["extrapolated"]
     assert "could not be used" in sz["note"]
     assert sz["auc24"] == pytest.approx(500.0 * 3 / 3.0, rel=5e-3)   # dose 5: 99.75% of steady state
+
+
+# --------------------------------------------------------------------------
+# Holford 2024 (transcribed from the published NM-TRAN control stream)
+# --------------------------------------------------------------------------
+from vankedoodle import models as _M
+
+
+def test_janmahasatian_ffm_reproduces_the_standard_male():
+    # The control stream's FFMSTD of 56.1 kg is a 70 kg, 176 cm man.
+    assert _M.janmahasatian_ffm(70.0, 176.0, "M") == pytest.approx(56.1, abs=0.05)
+
+
+def test_frffm_matches_ohanlon_figure_1():
+    # Read off O'Hanlon 2023 Figure 1: girls ~1.02 at 2 y and ~1.05 at 20 y PMA;
+    # boys ~0.83 at 1.8 y and ~0.99 at 20 y; capped at 1.19 (F) / 1.16 (M).
+    assert _M.ohanlon_frffm(2.0 * 52, "F") == pytest.approx(1.02, abs=0.01)
+    assert _M.ohanlon_frffm(20.0 * 52, "F") == pytest.approx(1.06, abs=0.01)
+    assert _M.ohanlon_frffm(1.8 * 52, "M") == pytest.approx(0.83, abs=0.01)
+    assert _M.ohanlon_frffm(20.0 * 52, "M") == pytest.approx(0.99, abs=0.01)
+    assert _M.ohanlon_frffm(24.0, "F") == pytest.approx(1.19)
+    assert _M.ohanlon_frffm(24.0, "M") == pytest.approx(1.16)
+
+
+def test_holford_renal_function_follows_the_control_stream():
+    # Hand calculation from the $PK block for an 8-year-old boy.
+    pt = vd.Patient(weight_kg=25.0, height_cm=127.0, age_years=8.0, sex="M",
+                    scr_umol_l=40.0)
+    r = _M.holford_renal_function(pt)
+    pma = pt.pma_weeks
+    ffm = _M.ohanlon_frffm(pma, "M") * _M.janmahasatian_ffm(25.0, 127.0, "M")
+    ngfr = 6.96 * (ffm / 56.1) ** 0.75 / (1 + (pma / 33.6) ** -3.49) * (
+        1 - 0.588 + 0.588 * (1 - math.exp(-math.log(2) / 6.94 * pt.age_days)))
+    cpr = 0.516 * (88.4 - 22.25) / 88.4 * (1 - 0.0315 / 100 * (1080 - pma)) * 0.86 * ffm / 56.1
+    assert r["ngfr_l_h"] == pytest.approx(ngfr, rel=1e-9)
+    assert r["cpr_mmol_h"] == pytest.approx(cpr, rel=1e-9)
+    assert r["rf"] == pytest.approx(cpr / 0.040 / ngfr, rel=1e-9)
+    # Uncompensated Jaffe creatinine is converted with 0.748 -> higher RF.
+    rj = _M.holford_renal_function(pt, scr_assay="jaffe")
+    assert rj["rf"] == pytest.approx(r["rf"] / ((88.4 - 22.25) / 88.4), rel=1e-9)
+
+
+def test_holford_clearance_components_and_random_effects():
+    pt = vd.Patient(weight_kg=25.0, height_cm=127.0, age_years=8.0, sex="M",
+                    scr_umol_l=40.0)
+    c = _M._holford_components(pt, "enzymatic")
+    rf = c["rf"]
+    hill = 1.88 if rf <= 0.531 else 5.08
+    assert c["CL_GFR"] == pytest.approx(
+        c["ngfr_l_h"] * 0.567 / (1 + (rf / 0.531) ** -hill), rel=1e-9)
+    typ = vd.HOLFORD2024.typical(pt)
+    assert typ["CL"] == pytest.approx(c["CL_GFR"] + c["CL_NGFR"], rel=1e-12)
+    # separate etas on the two clearance components, summed
+    ind = vd.HOLFORD2024.individual(pt, [math.log(2.0), 0.0, 0.0, 0.0, 0.0])
+    assert ind["CL"] == pytest.approx(2 * c["CL_GFR"] + c["CL_NGFR"], rel=1e-12)
+    assert ind["V1"] == pytest.approx(typ["V1"])
+    assert vd.HOLFORD2024.n_compartments == 2
+    assert vd.HOLFORD2024.sigma_prop == 0.15 and vd.HOLFORD2024.sigma_add == 2.14
+
+
+def test_holford_clearance_tracks_renal_function_both_ways():
+    base = dict(weight_kg=25.0, height_cm=127.0, age_years=8.0, sex="M")
+    cl = {s: vd.HOLFORD2024.typical(vd.Patient(scr_umol_l=s, **base))["CL"]
+          for s in (20.0, 40.0, 80.0)}
+    assert cl[20.0] > cl[40.0] > cl[80.0]
+    # Unlike Smit (capped at 120 mL/min/1.73 m2), augmented clearance keeps rising.
+    assert cl[20.0] / cl[40.0] > 1.15
+
+
+def test_holford_requires_sex():
+    rows = vd.compare_models(
+        {"weight_kg": 20, "age_years": 6, "height_cm": 115, "scr": 0.4},
+        {"dose_mg": 300, "interval_h": 6, "n_doses": 5, "start": 0.0},
+        levels=[(23.5, 9.0)])
+    errs = {r["model"]: r.get("error", "") for r in rows}
+    assert "sex" in errs["holford2024"]
+    assert "error" not in [k for k, v in errs.items() if v and not k.startswith("holford")]
+
+
+def test_holford_bayesian_fit_runs_with_five_random_effects():
+    pt = vd.Patient(weight_kg=23.0, height_cm=122.0, age_years=7.0, sex="F",
+                    scr_mg_dl=0.4)
+    doses = [vd.Dose(450.0, 8.0 * k, 1.0) for k in range(5)]
+    f = vd.fit(pt, doses, [vd.Level(26.0, 30.2), vd.Level(31.5, 8.3)],
+                   model="holford2024")
+    assert len(f.eta) == 5
+    assert 1.0 < f.cl < 5.0

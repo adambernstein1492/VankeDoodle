@@ -476,6 +476,8 @@ def comparison_table(response: Mapping) -> pd.DataFrame:
 # ======================================================================
 PARAMETER_LABELS = {
     "CL": "Clearance (L/h)",
+    "CL_GFR": "Clearance, GFR-linked part (L/h)",
+    "CL_NGFR": "Clearance, non-GFR part (L/h)",
     "V": "Volume (L)",
     "V1": "Central volume (L)",
     "Q": "Intercompartmental clearance (L/h)",

@@ -191,9 +191,27 @@ of the model, so one- and two-compartment priors are interchangeable everywhere:
 | `lamarre2000` | 2-compartment | < 18 y, 78 patients, single centre | linear in original-Schwartz creatinine clearance, plus a weight term |
 | `colin2019` | 2-compartment | neonate to elderly, pooled across 14 studies | weight^0.75, PMA maturation, age-related decline, creatinine (mg/dL) vs a PMA-based reference |
 | `frymoyer2014` | 1-compartment | neonates, level III NICU, 249 patients | weight^0.75, PMA maturation, (1/SCr)^0.267 |
+| `holford2024` | 2-compartment | premature neonates to elderly adults, 18 pooled studies (9,901 patients on gentamicin, amikacin or vancomycin); the model behind NextDose | GFR-linked + non-GFR clearance, each scaled by renal function (eGFR / normal GFR) with fat-free mass, normal fat mass and maturation (O'Hanlon 2023); needs sex and height |
+| `holford2024_jaffe` | as above | as above | as above, for uncompensated Jaffe creatinine (multiplied by 0.748) |
 
-`colin2019` and `frymoyer2014` are the two that cover neonates; `colin2019` is the
-only one spanning neonates and older children in a single prior.
+`colin2019`, `frymoyer2014` and `holford2024` cover neonates; `colin2019` and
+`holford2024` span neonates to adults in a single prior.
+
+**Holford 2024** is transcribed from the NM-TRAN control stream published as the
+paper's Supporting Information (vancomycin branch), with fat-free mass from the
+O'Hanlon 2023 fractional FFM model (Table 1 and the 2023 erratum). Clearance is
+the sum of a GFR-linked part (0.567 x normal GFR x a sigmoid in renal function)
+and a non-GFR part proportional to renal function; each has its own between-subject
+variability, so the fit carries five random effects (CL_GFR, CL_NGFR, V1, Q, V2).
+Residual error is 15% + 2.14 mg/L (the reference study). Choose `holford2024` for
+enzymatic or IDMS-traceable creatinine and `holford2024_jaffe` for uncompensated
+Jaffe results. Not modelled: inotropes (V x1.15), ibuprofen (non-GFR CL x0.744),
+non-steady-state creatinine and the study-specific residual-error multipliers.
+The control stream gives 5.5 L/h for the 70 kg standard male at renal function 1,
+not the 4.70 L/h quoted in the paper's Table 2; the code, which produced the
+estimates, is followed. With enzymatic creatinine at age-typical values it
+predicts 10-25% lower clearance than `smit2021` in children, in line with the
+positive a-priori bias reported for NextDose in children.
 
 ```python
 import vankedoodle as vd
