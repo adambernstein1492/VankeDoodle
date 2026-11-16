@@ -169,6 +169,7 @@ def concentration_figure(response: Mapping, model: Optional[str] = None,
                          overlay: Optional[Mapping] = None,
                          overlay_models: Sequence[str] = (),
                          forecast_from: Optional[Mapping] = None,
+                         window_h: float = 72.0,
                          model_order: Optional[Sequence[str]] = None) -> go.Figure:
     """The whole course on one plot: population prior, fitted curve and measured
     levels over the doses given, then the forecasted concentration under the
@@ -261,9 +262,22 @@ def concentration_figure(response: Mapping, model: Optional[str] = None,
     # Each regimen named in its curve's colour where it begins, along the bottom
     # of the plot (clear of the legend above it): the current one at the first
     # dose, the forecast where it starts.
+    # A long history opens on its last ``window_h`` hours plus the forecast, with
+    # an overview strip under the plot: drag the window in the strip (or pan the
+    # plot) to move back through earlier days. Short histories show everything.
+    end_h = f["time_h"][-1] if f and show["forecast"] else s["time_h"][-1]
+    focus_h = f["next_dose_h"] if f and show["forecast"] else s["time_h"][-1]
+    start_h = s["time_h"][0]
+    scrolling = end_h - start_h > window_h + 48.0
+    if scrolling:
+        start_h = focus_h - window_h
+        fig.update_xaxes(range=[x([start_h])[0], x([end_h])[0]],
+                         rangeslider=dict(visible=True, thickness=0.07,
+                                          bgcolor="rgba(128,128,128,0.08)"))
+        fig.update_layout(dragmode="pan")
     labels = []
     if show["fitted"]:
-        labels.append((s["time_h"][0], given_label(response), POSTERIOR_COLOUR))
+        labels.append((start_h, given_label(response), POSTERIOR_COLOUR))
     if f and show["forecast"]:
         labels.append((f["next_dose_h"], forecast_label(f), PROJECTION_COLOUR))
     for hours, text, colour in labels:
@@ -271,7 +285,7 @@ def concentration_figure(response: Mapping, model: Optional[str] = None,
                            xanchor="left", xshift=6, yshift=4,
                            text=f"<b>{text}</b>", showarrow=False,
                            font=dict(size=14, color=colour))
-    fig.update_layout(height=480)
+    fig.update_layout(height=540 if scrolling else 480)   # the strip needs room
     return fig
 
 
