@@ -1399,3 +1399,18 @@ def test_closed_form_solver_matches_the_event_by_event_solver():
         c, a = m.simulate(doses, times)
         assert np.allclose(c, c_ref, rtol=1e-7, atol=1e-9 * max(1.0, np.max(np.abs(c_ref))))
         assert np.allclose(a, a_ref, rtol=1e-7, atol=1e-9 * max(1.0, np.max(np.abs(a_ref))))
+
+
+def test_current_interval_ignores_a_supplemental_dose():
+    """Regression: a 50 mg supplement 2.4 h after a dose made the current regimen
+    read as q2.4h (the shortest gap) and tripled the reported daily dose."""
+    from vankedoodle.api import _observed_interval
+    starts = [0, 6.1, 11.9, 18.2, 20.6, 24.0, 30.2, 35.9, 42.1, 47.8]   # q6h, one extra
+    h = vd.DosingHistory([vd.Dose(275, s, 1.0) for s in starts])
+    assert _observed_interval(h) == 6.0
+    h = vd.DosingHistory([vd.Dose(450, 8.0 * i + (0.4 if i % 2 else -0.3), 1.0) for i in range(6)])
+    assert _observed_interval(h) == 8.0
+    h = vd.DosingHistory([vd.Dose(300, 10.0 * i, 1.0) for i in range(5)])   # off-schedule
+    assert _observed_interval(h) == 10.0
+    h = vd.DosingHistory([vd.Dose(300, 0.0, 1.0)])
+    assert _observed_interval(h) == 24.0

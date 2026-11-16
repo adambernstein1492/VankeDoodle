@@ -119,10 +119,27 @@ def _build_history(request: Mapping) -> DosingHistory:
         start=reg.get("start", 0.0), first_dose_mg=reg.get("first_dose_mg"))
 
 
-def _observed_interval(history: DosingHistory) -> float:
+STANDARD_INTERVALS_H = (4.0, 6.0, 8.0, 12.0, 18.0, 24.0, 36.0, 48.0)
+
+
+def _observed_interval(history: DosingHistory, recent: int = 4) -> float:
+    """The interval the patient is currently dosed at.
+
+    The median of the last few gaps between dose starts, so a one-off extra
+    dose or a late dose does not set it (the shortest gap once did: a 50 mg
+    supplement 2.4 h after a q6h dose made the regimen read as q2.4h). Real
+    administration times drift around the ordered interval, so a median within
+    15% of a standard interval is reported as that interval.
+    """
     starts = sorted(d.start_h for d in history.doses)
     gaps = [b - a for a, b in zip(starts[:-1], starts[1:]) if b > a]
-    return min(gaps) if gaps else 24.0
+    if not gaps:
+        return 24.0
+    tau = float(np.median(gaps[-recent:]))
+    nearest = min(STANDARD_INTERVALS_H, key=lambda s: abs(s - tau))
+    if abs(nearest - tau) <= 0.15 * nearest:
+        return nearest
+    return round(tau * 2.0) / 2.0              # off-schedule: nearest half hour
 
 
 def _series(fit, prior_fit, history: DosingHistory, recommended: Optional[Exposure],
