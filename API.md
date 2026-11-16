@@ -33,7 +33,7 @@ anything that removes or repurposes a field will.
     "age_on": null,                    //   date the age is taken on (default: first dose date
                                        //   when doses carry clock times, otherwise today)
     "height_cm": 122.0,
-    "sex": "M",                        // only used by lamarre2000 (Schwartz k)
+    "sex": "M",                        // lamarre2000 (Schwartz k); required by holford2024
     "scr_mg_dl": 0.33,                 // or "scr_umol_l"; the other is derived
     "crcl": null,                      // optional: supply bedside Schwartz directly
     "gestational_age_weeks": null,     // neonates

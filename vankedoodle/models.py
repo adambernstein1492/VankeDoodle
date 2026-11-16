@@ -21,7 +21,7 @@ from typing import Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .core import (WEEKS_PER_YEAR, Patient, body_surface_area,
+from .core import (DAYS_PER_YEAR, WEEKS_PER_YEAR, Patient, body_surface_area,
                    schwartz_1976)
 
 
@@ -60,11 +60,19 @@ class PopPKModel:
     covariate_ranges: Mapping[str, Tuple[float, float]] = field(default_factory=dict)
     population: str = ""
     notes: str = ""
+    # Optional override for models whose random effects do not sit one-to-one on
+    # the returned parameters (e.g. separate etas on two components of CL that are
+    # summed).  Called as individual_fn(patient, eta) with eta None or a vector in
+    # the order of eta_params; must return the same keys as ``typical``.
+    individual_fn: Optional[Callable[[Patient, Optional[np.ndarray]], Dict[str, float]]] = None
 
     # -- structure ------------------------------------------------------
     def individual(self, patient: Patient, eta: Sequence[float] | None = None
                    ) -> Dict[str, float]:
         """Typical parameters with log-normal random effects applied."""
+        if self.individual_fn is not None:
+            return self.individual_fn(
+                patient, None if eta is None else np.asarray(eta, dtype=float))
         pars = dict(self.typical(patient))
         if eta is not None:
             for name, e in zip(self.eta_params, np.asarray(eta, dtype=float)):
@@ -117,7 +125,7 @@ PREMATURITY_RELEVANT_PMA_WEEKS = 104.0
 
 
 _PROBE_PATIENT = Patient(weight_kg=20.0, age_years=6.0, height_cm=115.0, scr_mg_dl=0.5,
-                         postnatal_age_days=6.0 * 365.25)
+                         postnatal_age_days=6.0 * 365.25, sex="M")
 
 
 # ==========================================================================
@@ -458,8 +466,238 @@ FRYMOYER2014 = PopPKModel(
 )
 
 
+# ==========================================================================
+# Holford et al. 2024 -- joint gentamicin/amikacin/vancomycin model, premature
+# neonates to adults (NextDose "GAV 2023").  Two-compartment.
+#
+# Transcribed from the published NM-TRAN control stream (Br J Clin Pharmacol
+# 2024;90:1066-80, Supporting Information S1), vancomycin branch (DRUG = 1).
+# Fat-free mass, creatinine production rate (CPR) and normal GFR come from
+# O'Hanlon et al., CPT Pharmacometrics Syst Pharmacol 2023;12:401-12 (Table 1,
+# Equations 5-9 with the 2023 erratum: FFMIN = FFMAT x FMAT_MAX, FFMAT fixed 0).
+# ==========================================================================
+_LN2 = math.log(2.0)
+HOLFORD_FFM_STD = 56.1          # kg, FFM of the 70 kg, 176 cm standard male
+HOLFORD_FAT_STD = 13.9          # kg, 70 - 56.1
+HOLFORD_ADULT_PMA_WEEKS = 20 * 52 + 40      # 1080
+# Jaffe -> enzymatic creatinine: (88.4 - 22.25)/88.4 = 0.748 (O'Hanlon Eq 12)
+HOLFORD_FSCR = (88.4 - 22.25) / 88.4
+
+# O'Hanlon 2023 Table 1: fractional FFM (FRFFM) model, sex specific.
+_FRFFM = {
+    "M": dict(FMAT_PRE=5.20, TFF_PRE=0.060, FMAT_MAX=1.74, A50=3.54,
+              HILL_Y=0.127, HILL_O=0.164, CAP=1.16),
+    "F": dict(FMAT_PRE=0.837, TFF_PRE=0.12, FMAT_MAX=2.03, A50=1.53,
+              HILL_Y=0.0339, HILL_O=0.0306, CAP=1.19),
+}
+
+# Holford 2024 $THETA, vancomycin branch (final estimates; the control stream's
+# initial values reproduce the paper's Table 2).
+_HOLFORD_V = dict(
+    FGFR=0.567, CLGFR_EMAX=1.0, RF50=0.531, HILL_LT=1.88, HILL_GE=5.08,
+    CLNGFR=1.67, CLNGFR_TM50=57.8, CLNGFR_HILL=3.24, CLNGFR_PNAMAX=0.962,
+    CLNGFR_PNAT50=2.84, CLNGFR_FFAT=0.324,
+    V=32.5, V_FFAT=0.337, VP=27.4, VP_FFAT=11.7, Q=1.33, Q_FFAT=4.02,
+    PWR_CL=0.75, PWR_Q=0.75, PWR_V1=1.0, PWR_V2=1.0,
+    FNEOVC=0.109, T2NEOVC=266.0, FNEOVP=0.0156, T2NEOVP=247.0,   # half-lives in days
+    # normal GFR (O'Hanlon 2023 Table 3 as coded in the control stream)
+    STDGFR=116 * 60 / 1000, TM50GFR=33.6, HILLGFR=3.49, PNAMAX=0.588, PNAT50=6.94,
+    # creatinine production (Matthews 2004 / O'Hanlon 2023 Table 2)
+    STDCPR_JAFFE=0.516, CPR_FSDY4=0.86, CPR_INT={"M": 0.764, "F": 0.72},
+    CPR_SLOPE={"M": -0.0315, "F": -0.0274},
+)
+
+
+def _sex_code(sex: Optional[str]) -> Optional[str]:
+    if sex is None:
+        return None
+    s = str(sex).strip().lower()
+    if s in ("m", "male", "boy", "1"):
+        return "M"
+    if s in ("f", "female", "girl", "2"):
+        return "F"
+    return None
+
+
+def janmahasatian_ffm(weight_kg: float, height_cm: float, sex: str) -> float:
+    """Adult fat-free mass (Janmahasatian 2005), kg."""
+    bmi = weight_kg / (height_cm / 100.0) ** 2
+    if _sex_code(sex) == "F":
+        return 9270.0 * weight_kg / (8780.0 + 244.0 * bmi)
+    return 9270.0 * weight_kg / (6680.0 + 216.0 * bmi)
+
+
+def ohanlon_frffm(pma_weeks: float, sex: str) -> float:
+    """Fraction of adult-predicted FFM (O'Hanlon 2023 Eqs 6-9, with erratum)."""
+    p = _FRFFM[_sex_code(sex)]
+    pma_y = pma_weeks / 52.0
+    ffmin = 0.0 * p["FMAT_MAX"]                                   # FFMAT fixed at 0
+    ffneo = (p["FMAT_PRE"] - ffmin) * math.exp(-_LN2 / p["TFF_PRE"] * (pma_y - 24.0 / 52.0))
+    hill = p["HILL_Y"] if pma_y < p["A50"] else p["HILL_O"]
+    ffkid = (p["FMAT_MAX"] - ffmin) / (1.0 + (pma_y / p["A50"]) ** (-hill))
+    return min(ffmin + ffneo + ffkid, p["CAP"])
+
+
+def ohanlon_ffm(weight_kg: float, height_cm: float, sex: str, pma_weeks: float) -> float:
+    """Fat-free mass from neonates to adults (O'Hanlon 2023), kg."""
+    return ohanlon_frffm(pma_weeks, sex) * janmahasatian_ffm(weight_kg, height_cm, sex)
+
+
+def holford_renal_function(patient: Patient, scr_assay: str = "enzymatic"
+                           ) -> Dict[str, float]:
+    """Renal function RF = eGFR / normal GFR, as coded in the Holford 2024 $PK.
+
+    ``scr_assay`` is the method behind the patient's serum creatinine:
+    "enzymatic" (also IDMS-traceable compensated Jaffe) or "jaffe" (uncompensated;
+    multiplied by 0.748 to its enzymatic equivalent, as for most source studies).
+    Serum creatinine is treated as being at steady state.
+    """
+    h = _HOLFORD_V
+    sex = _sex_code(patient.sex)
+    if sex is None:
+        raise ValueError("Model 'holford2024' needs the patient's sex (M or F): fat-free "
+                         "mass and creatinine production are sex specific.")
+    for need in ("height_cm", "scr_umol_l", "pma_weeks", "age_days"):
+        if patient.get(need) is None:
+            raise ValueError(f"Model 'holford2024' requires {need}.")
+    wt = float(patient.weight_kg)
+    pma = float(patient.pma_weeks)
+    pnad = float(patient.age_days)
+    pnay = pnad / DAYS_PER_YEAR
+    ffm = ohanlon_ffm(wt, float(patient.height_cm), sex, pma)
+    ffmi = min(ffm, 0.95 * wt)                                        # FFMKGI
+
+    # normal GFR (FFTGFR = 0, so size is FFM alone)
+    fsz_gfr = (ffmi / HOLFORD_FFM_STD) ** 0.75
+    fmt_gfr = 1.0 / (1.0 + (pma / h["TM50GFR"]) ** (-h["HILLGFR"]))
+    fpnt_gfr = 1.0 - h["PNAMAX"] + h["PNAMAX"] * (1.0 - math.exp(-_LN2 / h["PNAT50"] * pnad))
+    ngfr = h["STDGFR"] * fsz_gfr * fmt_gfr * fpnt_gfr                  # L/h
+
+    j2enz = 1.0 if scr_assay == "enzymatic" else HOLFORD_FSCR
+    scr_u = float(patient.scr_umol_l)
+    scrz = scr_u * j2enz
+    # creatinine production rate
+    if pma < HOLFORD_ADULT_PMA_WEEKS:
+        fpma_cpr = (h["CPR_INT"][sex] if pma <= 44.0
+                    else 1.0 + h["CPR_SLOPE"][sex] / 100.0 * (HOLFORD_ADULT_PMA_WEEKS - pma))
+    else:
+        fpma_cpr = 1.0
+    if pnay >= 20.0:                                   # Matthews et al. 2004, adults
+        if scrz >= 60.0 * j2enz:
+            fsex = 0.82 if sex == "F" else 1.0
+            fmt_cpr = (112.0 - pnay) * fsex / (112.0 - 40.0)
+        else:
+            fmt_cpr = (119.0 - pnay) * 0.7 / (119.0 - 40.0)
+    else:
+        fmt_cpr = 1.0
+    stdcprz = h["STDCPR_JAFFE"] * HOLFORD_FSCR                         # enzymatic
+    cpr = stdcprz * fmt_cpr * fpma_cpr * h["CPR_FSDY4"] * (ffmi / HOLFORD_FFM_STD)  # mmol/h
+    if pnad < 2.0:                                     # creatinine still maternal
+        egfr, rf = float("nan"), 1.0
+    else:
+        egfr = cpr / (scrz / 1000.0)                                   # L/h
+        rf = egfr / ngfr
+    return {"ffm_kg": ffm, "ffm_used_kg": ffmi, "ngfr_l_h": ngfr, "cpr_mmol_h": cpr,
+            "egfr_l_h": egfr, "rf": rf}
+
+
+def _holford_components(patient: Patient, scr_assay: str) -> Dict[str, float]:
+    h = _HOLFORD_V
+    r = holford_renal_function(patient, scr_assay)
+    wt = float(patient.weight_kg)
+    ffmi = r["ffm_used_kg"]
+    pma = float(patient.pma_weeks)
+    pnad = float(patient.age_days)
+    rf = r["rf"]
+
+    def fsize(ffat: float, pwr: float) -> float:
+        nfm = ffmi + ffat * (wt - ffmi)
+        nfm_std = HOLFORD_FFM_STD + ffat * HOLFORD_FAT_STD
+        return (nfm / nfm_std) ** pwr
+
+    # GFR clearance: asymmetric sigmoid in RF
+    hill = h["HILL_LT"] if rf <= h["RF50"] else h["HILL_GE"]
+    f_rf = h["CLGFR_EMAX"] / (1.0 + (rf / h["RF50"]) ** (-hill))
+    cl_gfr = r["ngfr_l_h"] * h["FGFR"] * f_rf
+    # non-GFR clearance: proportional to RF, own maturation and size
+    fpma = 1.0 / (1.0 + (pma / h["CLNGFR_TM50"]) ** (-h["CLNGFR_HILL"]))
+    fpnt = (1.0 if pnad <= 0 else
+            1.0 - h["CLNGFR_PNAMAX"]
+            + h["CLNGFR_PNAMAX"] * (1.0 - math.exp(-_LN2 / h["CLNGFR_PNAT50"] * pnad)))
+    cl_ngfr = (h["CLNGFR"] * rf * fpma * fpnt
+               * fsize(h["CLNGFR_FFAT"], h["PWR_CL"]))   # FVNT = 1; NSAIDs not modelled
+    v1 = (h["V"] * (1.0 + h["FNEOVC"] * math.exp(-_LN2 / h["T2NEOVC"] * pnad))
+          * fsize(h["V_FFAT"], h["PWR_V1"]))             # inotropes (x1.15) not modelled
+    v2 = (h["VP"] * (1.0 + h["FNEOVP"] * math.exp(-_LN2 / h["T2NEOVP"] * pnad))
+          * fsize(h["VP_FFAT"], h["PWR_V2"]))
+    q = h["Q"] * fsize(h["Q_FFAT"], h["PWR_Q"])
+    return {"CL_GFR": cl_gfr, "CL_NGFR": cl_ngfr, "V1": v1, "Q": q, "V2": v2, **r}
+
+
+def _holford_individual(scr_assay: str):
+    def individual(patient: Patient, eta: Optional[np.ndarray]) -> Dict[str, float]:
+        c = _holford_components(patient, scr_assay)
+        e = np.zeros(5) if eta is None else eta
+        cl = c["CL_GFR"] * math.exp(e[0]) + c["CL_NGFR"] * math.exp(e[1])
+        return {"CL": cl, "V1": c["V1"] * math.exp(e[2]),
+                "Q": c["Q"] * math.exp(e[3]), "V2": c["V2"] * math.exp(e[4])}
+    return individual
+
+
+def make_holford2024(scr_assay: str = "enzymatic") -> PopPKModel:
+    """Holford 2024 for a given creatinine assay ("enzymatic" or "jaffe")."""
+    if scr_assay not in ("enzymatic", "jaffe"):
+        raise ValueError("scr_assay must be 'enzymatic' or 'jaffe'.")
+    ind = _holford_individual(scr_assay)
+    suffix = "" if scr_assay == "enzymatic" else "_jaffe"
+    assay_text = ("enzymatic / IDMS-traceable creatinine" if scr_assay == "enzymatic"
+                  else "uncompensated Jaffe creatinine (x0.748 to enzymatic)")
+    return PopPKModel(
+        name=f"holford2024{suffix}",
+        label=f"Holford 2024 (neonates to adults, GFR-based; {assay_text})",
+        reference=("Holford N, O'Hanlon CJ, Allegaert K, et al. A physiological approach "
+                   "to renal clearance: from premature neonates to adults. Br J Clin "
+                   "Pharmacol. 2024;90(4):1066-1080. doi:10.1111/bcp.15978; with "
+                   "O'Hanlon CJ, Holford N, Sumpter A, Al-Sallami HS. CPT Pharmacometrics "
+                   "Syst Pharmacol. 2023;12:401-412. doi:10.1002/psp4.12924"),
+        typical=lambda p: ind(p, None),
+        individual_fn=ind,
+        eta_params=("CL_GFR", "CL_NGFR", "V1", "Q", "V2"),
+        # $OMEGA variances, vancomycin: BSV_CLGFR_VANC, BSV_CLNGFR, BSV_V, PPV_Q, PPV_VP
+        omega=np.diag([0.049, 0.134, 0.00039, 0.0645, 0.182]),
+        # $ERROR: SD = FRVSDY*sqrt((0.15*CP)^2 + 2.14^2)*exp(ETA9); reference study
+        # (FRVSDY = 1) and the typical individual (ETA9 = 0) are used.
+        sigma_prop=0.15,
+        sigma_add=2.14,
+        required=("weight_kg", "height_cm", "scr_umol_l", "sex", "pma_weeks", "age_days"),
+        covariate_ranges={"age_years": (0.0, 100.0)},
+        population=("pooled GAVamycin data: 18 studies, 9,901 patients on gentamicin, "
+                    "amikacin or vancomycin, premature neonates to elderly adults; "
+                    f"assumes {assay_text}"),
+        notes=("Two-compartment. CL = CL_GFR + CL_NGFR. CL_GFR = 0.567 x normal GFR x "
+               "sigmoid(RF; RF50 0.531, Hill 1.88 below / 5.08 above). CL_NGFR = 1.67 L/h "
+               "x RF x maturation x (NFM/NFMstd)^0.75 with Ffat 0.324. RF = eGFR/normal "
+               "GFR, eGFR = creatinine production rate / SCr, all scaled by fat-free mass "
+               "(O'Hanlon 2023). V1 32.5, V2 27.4 L, Q 1.33 L/h per 70 kg standard, "
+               "normal-fat-mass scaled (Ffat 0.337, 11.7, 4.02). Separate log-normal BSV "
+               "on CL_GFR (omega^2 0.049) and CL_NGFR (0.134), V1 (0.00039), Q (0.0645), "
+               "V2 (0.182), variances taken directly from $OMEGA. Residual error 15% + "
+               "2.14 mg/L for the reference study; the study-specific multipliers "
+               "(0.61-3.57) and the between-subject variability of residual error "
+               "(omega^2 0.629) are not used. Not modelled: inotropes (V x1.15), NSAIDs "
+               "(ibuprofen CL_NGFR x0.744), non-steady-state creatinine kinetics, "
+               "between-occasion variability (negligible). Requires sex, height and "
+               "postmenstrual age (term assumed when gestational age is not given)."),
+    )
+
+
+HOLFORD2024 = make_holford2024("enzymatic")
+HOLFORD2024_JAFFE = make_holford2024("jaffe")
+
+
 MODELS: Dict[str, PopPKModel] = {m.name: m for m in (
-    SMIT2021, XU2026, LE2013, LAMARRE2000, COLIN2019, FRYMOYER2014)}
+    SMIT2021, XU2026, LE2013, LAMARRE2000, COLIN2019, FRYMOYER2014,
+    HOLFORD2024, HOLFORD2024_JAFFE)}
 DEFAULT_MODEL = "smit2021"
 
 
