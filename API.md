@@ -191,8 +191,11 @@ weights are unreliable), and `posterior_ess` is the effective number of draws.
 Draws are seeded, so the same request always gives the same numbers. Every
 curve's time grid includes each infusion start and end, so peaks are exact.
 `sawchuk_zaske.curve` (`time_into_interval_h`, `conc`) is always present when the
-two-level result is available. The pair is the two most recent levels, each timed
-from the dose it follows. `extrapolated: true` means they followed two different
+two-level result is available. The pair is the most recent peak (1-3 h after its
+infusion ends) and trough (just before the next dose), each timed from the dose it
+follows; `levels_role` gives each one's timing and whether it was in the ideal
+window, and `classification` lists every level's role (`peak`, `trough` or null)
+with the reason. `extrapolated: true` means they followed two different
 (identical) doses and were placed in one interval assuming steady state; then
 `doses_used` lists those doses. `note`, when present, says the most recent pair
 was unusable and an earlier same-interval pair was used instead.

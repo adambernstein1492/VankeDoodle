@@ -1463,8 +1463,12 @@ def test_two_level_falls_back_to_an_earlier_same_interval_pair():
     c = pk.concentrations(doses, times)
     sz = two_level_from_history(doses, [vd.Level(t, float(x)) for t, x in zip(times, c)],
                                 interval_h=8.0)
-    assert sz["available"] and not sz["extrapolated"]
-    assert "could not be used" in sz["note"]
+    # the newest pair (peak after dose 7, trough before it) straddles the changed
+    # dose; the newest *valid* pair is the peak after dose 5 and the trough before
+    # dose 7, both following identical 500 mg doses
+    assert sz["available"] and sz["extrapolated"]
+    assert sz["levels_role"]["peak"]["time_h"] == pytest.approx(8.0 * 5 + 2.0)
+    assert sz["levels_role"]["trough"]["time_h"] == pytest.approx(8.0 * 7 - 0.25)
     assert sz["auc24"] == pytest.approx(500.0 * 3 / 3.0, rel=5e-3)   # dose 5: 99.75% of steady state
 
 
@@ -1553,3 +1557,44 @@ def test_holford_bayesian_fit_runs_with_five_random_effects():
                    model="holford2024")
     assert len(f.eta) == 5
     assert 1.0 < f.cl < 5.0
+
+
+
+def test_levels_are_classified_as_peak_or_trough():
+    from vankedoodle.reference import classify_levels
+    doses = [vd.Dose(500.0, 8.0 * i, 1.0) for i in range(6)]
+    t = {"during": 40.5, "early": 41.6, "peak": 42.5, "late peak": 44.0,
+         "random": 45.5, "trough": 47.8, "acceptable": 47.2}
+    rows = classify_levels(doses, [vd.Level(v, 10.0) for v in t.values()], 8.0)
+    role = {r["time_h"] if "time_h" in r else r["level"].time_h: r for r in rows}
+    got = {name: role[v]["role"] for name, v in t.items()}
+    assert got == {"during": None, "early": None, "peak": "peak", "late peak": "peak",
+                   "random": None, "trough": "trough", "acceptable": "trough"}
+    assert role[t["peak"]]["optimal"] and not role[t["late peak"]]["optimal"]   # 1.5 h vs 3 h
+    assert role[t["trough"]]["optimal"] and not role[t["acceptable"]]["optimal"]
+    assert "distribution" in role[t["early"]]["why"]
+
+
+def test_two_level_prefers_a_peak_and_trough_over_the_two_newest_levels():
+    """A random level drawn after the trough must not displace the peak-trough pair."""
+    from vankedoodle.reference import two_level_from_history
+    pk, doses = _one_cmt_steady_state_case()
+    times = [8.0 * 6 + 2.0, 8.0 * 7 - 0.25, 8.0 * 7 + 4.5]        # peak, trough, random
+    c = pk.concentrations(doses, times)
+    sz = two_level_from_history(doses, [vd.Level(t, float(x)) for t, x in zip(times, c)],
+                                interval_h=8.0)
+    assert sz["available"] and not sz["extrapolated"]
+    assert [round(l["time_h"], 2) for l in sz["levels_used"]] == [50.0, 55.75]
+    assert sz["auc24"] == pytest.approx(500.0 * 3 / 3.0, rel=2e-3)
+    assert "note" not in sz
+
+
+def test_two_level_without_a_peak_and_trough_says_so():
+    from vankedoodle.reference import two_level_from_history
+    pk, doses = _one_cmt_steady_state_case()
+    times = [8.0 * 7 + 3.5, 8.0 * 7 + 5.0]                        # two mid-interval levels
+    c = pk.concentrations(doses, times)
+    sz = two_level_from_history(doses, [vd.Level(t, float(x)) for t, x in zip(times, c)],
+                                interval_h=8.0)
+    assert sz["available"]                                        # still computed...
+    assert "No standard peak and trough" in sz["note"]            # ...but flagged

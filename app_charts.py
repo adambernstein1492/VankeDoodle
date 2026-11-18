@@ -123,20 +123,27 @@ def _when(response: Mapping, hours: float) -> str:
 
 
 def two_level_caption(response: Mapping) -> str:
-    """Which levels the two-level calculation used, and how, in one or two sentences."""
+    """Which levels the two-level calculation used, and how, in a few sentences."""
     sz = response["sawchuk_zaske"]
-    first, second = sz["levels_used"][0], sz["levels_used"][1]
-    text = (f"Using the {first['conc_mg_l']:.1f} mg/L level at "
-            f"{first['hours_into_interval']:.1f} h and the {second['conc_mg_l']:.1f} mg/L "
-            f"level at {second['hours_into_interval']:.1f} h into a {sz['interval_h']:g} h "
-            f"interval. Cmax {sz['cmax']:.1f}, Cmin {sz['cmin']:.1f} mg/L.")
+    roles = sz.get("levels_role")
+    if roles:
+        by_t = {round(l["time_h"], 6): l for l in sz["levels_used"]}
+        pk, tr = by_t[round(roles["peak"]["time_h"], 6)], by_t[round(roles["trough"]["time_h"], 6)]
+        text = (f"Peak {pk['conc_mg_l']:.1f} mg/L ({_when(response, pk['time_h'])}, "
+                f"{roles['peak']['why']}) and trough {tr['conc_mg_l']:.1f} mg/L "
+                f"({_when(response, tr['time_h'])}, {roles['trough']['why']}), placed "
+                f"{pk['hours_into_interval']:.1f} h and {tr['hours_into_interval']:.1f} h into the "
+                f"{sz['interval_h']:g} h interval. Cmax {sz['cmax']:.1f}, Cmin {sz['cmin']:.1f} mg/L.")
+    else:
+        first, second = sz["levels_used"][0], sz["levels_used"][1]
+        text = (f"Using the {first['conc_mg_l']:.1f} mg/L level at "
+                f"{first['hours_into_interval']:.1f} h and the {second['conc_mg_l']:.1f} mg/L "
+                f"level at {second['hours_into_interval']:.1f} h into the {sz['interval_h']:g} h "
+                f"interval. Cmax {sz['cmax']:.1f}, Cmin {sz['cmin']:.1f} mg/L.")
     if sz.get("extrapolated"):
-        by_time = sorted(sz["levels_used"], key=lambda l: l["time_h"])
         doses = sorted(sz["doses_used"], key=lambda d: d["time_h"])
-        text += (f" The {by_time[0]['conc_mg_l']:.1f} mg/L level ({_when(response, by_time[0]['time_h'])})"
-                 f" followed the dose at {_when(response, doses[0]['time_h'])} and the "
-                 f"{by_time[1]['conc_mg_l']:.1f} mg/L level followed the dose at "
-                 f"{_when(response, doses[1]['time_h'])}. Both doses, and any between them, were "
+        text += (f" They follow different doses ({_when(response, doses[0]['time_h'])} and "
+                 f"{_when(response, doses[1]['time_h'])}); every dose from one to the other was "
                  f"{sz['dose_mg']:g} mg over {sz['infusion_h']:g} h, so both are placed in one "
                  f"interval, assuming steady state.")
     if sz.get("note"):

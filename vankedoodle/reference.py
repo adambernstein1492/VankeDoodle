@@ -9,7 +9,7 @@ during elimination (Pai MP et al., Adv Drug Deliv Rev 2014;77:50-57).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Sequence
+from typing import List, Dict, Optional, Sequence
 
 import math
 
@@ -185,19 +185,149 @@ def _most_recent_pair(doses, levels, tau_regimen) -> Dict[str, object]:
     return _pair_result(dose, tau, first, t1, last, t2, extra)
 
 
+# When a level counts as a peak or a trough (2020 ASHP/IDSA/PIDS/SIDP vancomycin
+# guideline practice). A peak must be past distribution: at least 1 h after the
+# infusion ends (1-2 h ideal); 5 min of grace absorbs charting to the minute.
+# A trough is drawn just before the next dose: within 30 min is optimal; within
+# 1 h (2 h for intervals of 24 h or longer) is accepted and flagged.
+PEAK_AFTER_INFUSION_H = (55.0 / 60.0, 3.0)
+PEAK_IDEAL_AFTER_INFUSION_H = (1.0, 2.0)
+TROUGH_OPTIMAL_BEFORE_DOSE_H = 0.5
+
+
+def _trough_limit_h(tau: float) -> float:
+    return 2.0 if tau >= 24.0 else 1.0
+
+
+def classify_levels(doses: Sequence, levels: Sequence, tau_regimen: float) -> List[Dict[str, object]]:
+    """Each level's role in the two-level method: "peak", "trough" or None, with
+    the timing that decided it. A level is timed from the dose it follows; the
+    next dose is the recorded one, or one regimen interval later if not yet given."""
+    doses = sorted(doses, key=lambda d: d.start_h)
+    out = []
+    for lv in sorted(levels, key=lambda l: l.time_h):
+        i = _own_dose(doses, lv.time_h)
+        row = {"level": lv, "dose_index": i, "role": None, "why": ""}
+        if i is None:
+            row["why"] = "drawn before the first dose"
+            out.append(row)
+            continue
+        d = doses[i]
+        nxt = doses[i + 1].start_h if i + 1 < len(doses) else d.start_h + tau_regimen
+        since_end = lv.time_h - (d.start_h + d.duration_h)
+        before_next = nxt - lv.time_h
+        tau_here = nxt - d.start_h
+        row.update(since_end_h=since_end, before_next_h=before_next)
+        if since_end < 0:
+            row["why"] = "drawn during the infusion"
+        elif 0 <= before_next <= _trough_limit_h(tau_here):
+            row["role"] = "trough"
+            row["optimal"] = before_next <= TROUGH_OPTIMAL_BEFORE_DOSE_H
+            row["why"] = f"{before_next * 60:.0f} min before the next dose"
+        elif PEAK_AFTER_INFUSION_H[0] <= since_end <= PEAK_AFTER_INFUSION_H[1]:
+            row["role"] = "peak"
+            row["optimal"] = PEAK_IDEAL_AFTER_INFUSION_H[0] <= since_end <= PEAK_IDEAL_AFTER_INFUSION_H[1]
+            row["why"] = f"{since_end:.1f} h after the infusion ended"
+        elif since_end < PEAK_AFTER_INFUSION_H[0]:
+            row["why"] = (f"{since_end * 60:.0f} min after the infusion ended, inside the "
+                          "distribution phase (a peak needs at least 1 h)")
+        else:
+            row["why"] = "neither a peak (1-3 h after the infusion) nor a trough (just before the next dose)"
+        out.append(row)
+    return out
+
+
+def _public(rows) -> List[Dict[str, object]]:
+    """The classification as plain values (for JSON and the app)."""
+    keep = ("role", "why", "optimal", "since_end_h", "before_next_h")
+    return [{"time_h": r["level"].time_h, "conc_mg_l": r["level"].conc_mg_l,
+             **{k: r[k] for k in keep if k in r}} for r in rows]
+
+
+def _run_problem(doses, ia: int, ib: int, tau: float) -> Optional[str]:
+    """Why two levels after doses ``ia`` and ``ib`` cannot share one interval, or None."""
+    if ia == ib:
+        return None
+    lo, hi = min(ia, ib), max(ia, ib)
+    run = doses[lo:hi + 1]
+    if not all(_same_dose(run[0], d) for d in run[1:]):
+        amounts = sorted({f"{d.amount_mg:g} mg over {d.duration_h:g} h" for d in run})
+        return ("they follow different doses, and the doses between them were not all the "
+                "same (" + ", ".join(amounts) + ")")
+    gaps = [q.start_h - p.start_h for p, q in zip(run[:-1], run[1:])]
+    if any(abs(g - tau) > 0.25 * tau for g in gaps):
+        return (f"they follow different doses that were not given every {tau:g} h (gaps of "
+                + ", ".join(f"{g:.1f}" for g in gaps) + " h)")
+    return None
+
+
+def _peak_trough_pair(doses, levels, tau_regimen) -> Dict[str, object]:
+    """The most recent peak and trough that can be placed in one interval."""
+    rows = classify_levels(doses, levels, tau_regimen)
+    peaks = [r for r in rows if r["role"] == "peak"]
+    troughs = [r for r in rows if r["role"] == "trough"]
+    if not peaks or not troughs:
+        missing = "peak" if not peaks else "trough"
+        return {"available": False, "classification": _public(rows),
+                "reason": (f"No level qualifies as a {missing}. A peak is drawn 1-3 h after the "
+                           "infusion ends; a trough within 30 min (up to 1 h) before the next dose.")}
+    pairs = sorted(((p, t) for p in peaks for t in troughs),
+                   key=lambda pt: (max(pt[0]["level"].time_h, pt[1]["level"].time_h),
+                                   min(pt[0]["level"].time_h, pt[1]["level"].time_h)),
+                   reverse=True)
+    first_problem = None
+    for p, t in pairs:
+        problem = _run_problem(doses, p["dose_index"], t["dose_index"], tau_regimen)
+        if problem:
+            first_problem = first_problem or problem
+            continue
+        dp = doses[p["dose_index"]]
+        t1 = p["level"].time_h - dp.start_h
+        t2 = t["level"].time_h - doses[t["dose_index"]].start_h
+        if t["level"].conc_mg_l >= p["level"].conc_mg_l or t2 - t1 < 0.5:
+            continue
+        same = p["dose_index"] == t["dose_index"]
+        nxt = (doses[p["dose_index"] + 1].start_h - dp.start_h
+               if same and p["dose_index"] + 1 < len(doses) else tau_regimen)
+        extra = {"extrapolated": not same,
+                 "levels_role": {"peak": {"time_h": p["level"].time_h, "why": p["why"],
+                                          "optimal": p["optimal"]},
+                                 "trough": {"time_h": t["level"].time_h, "why": t["why"],
+                                            "optimal": t["optimal"]}}}
+        if not same:
+            extra["doses_used"] = [{"time_h": doses[i].start_h, "amount_mg": doses[i].amount_mg,
+                                    "infusion_h": doses[i].duration_h}
+                                   for i in (p["dose_index"], t["dose_index"])]
+        notes = []
+        if not t["optimal"]:
+            notes.append(f"The trough was drawn {t['why']} (within 30 min is optimal).")
+        if not p["optimal"]:
+            notes.append(f"The peak was drawn {p['why']} (1-2 h is ideal).")
+        if notes:
+            extra["note"] = " ".join(notes)
+        out = _pair_result(dp, nxt if same else tau_regimen, p["level"], t1, t["level"], t2, extra)
+        out["classification"] = _public(rows)
+        return out
+    return {"available": False, "classification": _public(rows),
+            "reason": ("A peak and a trough were found, but they cannot be placed in one "
+                       "interval: " + (first_problem or "the trough is not lower than the peak") + ".")}
+
+
 def two_level_from_history(doses: Sequence, levels: Sequence,
                            interval_h: Optional[float] = None) -> Dict[str, object]:
     """Two-level (Sawchuk-Zaske) AUC from a dosing history.
 
-    Uses the two most recent levels. If they were drawn after different doses
-    (a trough before dose N, a peak after it), they are placed in one interval
-    when every dose between them is identical and given at the regimen's
-    interval (steady state). If the two most recent levels cannot be used, falls
-    back to the most recent dosing interval holding a usable pair, and says why.
+    Uses the most recent peak and trough (see :func:`classify_levels`): a peak at
+    least 1 h after its infusion ends, a trough just before the next dose. When
+    they follow different doses (a trough before dose N, a peak after it) they are
+    placed in one interval only if every dose between them is identical and given
+    at the regimen's interval (steady state). If no such pair exists, the two most
+    recent levels are used when they can be, with a note that they are not a
+    standard peak and trough; otherwise the reason is returned.
 
-    Returns a dict with ``available`` and, when False, a ``reason`` written for
-    a clinician rather than a programmer. ``extrapolated`` marks a pair taken
-    from two different doses.
+    Returns a dict with ``available`` and, when False, a ``reason`` written for a
+    clinician. ``extrapolated`` marks a pair taken from two different doses;
+    ``classification`` lists every level's role and why.
     """
     doses = sorted(doses, key=lambda d: d.start_h)
     levels = sorted(levels, key=lambda l: l.time_h)
@@ -212,25 +342,16 @@ def two_level_from_history(doses: Sequence, levels: Sequence,
     gaps = [b - a for a, b in zip(starts[:-1], starts[1:]) if b > a]
     default_tau = interval_h if interval_h else (sorted(gaps)[len(gaps) // 2] if gaps else 24.0)
 
+    best = _peak_trough_pair(doses, levels, default_tau)
+    if best["available"]:
+        return best
+
     recent = _most_recent_pair(doses, levels, default_tau)
     if recent["available"]:
+        recent["note"] = ("No standard peak and trough were available ("
+                          + best["reason"].rstrip(".") + "); this uses the two most recent "
+                          "levels, so the estimate is less reliable.")
+        recent["classification"] = best.get("classification")
         return recent
-
-    # Fallback: the most recent single interval that holds a usable pair.
-    for i in range(len(doses) - 1, -1, -1):
-        dose = doses[i]
-        tau = (starts[i + 1] - starts[i]) if i + 1 < len(doses) else default_tau
-        window = [l for l in levels if dose.start_h <= l.time_h < dose.start_h + tau]
-        if len(window) < 2:
-            continue
-        first, last = window[0], window[-1]
-        t1 = first.time_h - dose.start_h
-        t2 = last.time_h - dose.start_h
-        if t1 < dose.duration_h or last.conc_mg_l >= first.conc_mg_l:
-            continue
-        out = _pair_result(dose, tau, first, t1, last, t2)
-        out["note"] = ("The two most recent levels could not be used ("
-                       + recent["reason"].rstrip(".") + "); this uses an earlier "
-                       "pair from one dosing interval.")
-        return out
+    recent["classification"] = best.get("classification")
     return recent
