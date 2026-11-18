@@ -112,7 +112,10 @@ def test_layers_can_be_switched_off(response):
 def test_forecast_regimen_is_written_at_the_bottom(response):
     import app_charts
     fig = app_charts.concentration_figure(response, peak_line=50.0)
-    labels = [a for a in fig.layout.annotations if "q8hr" in a.text]
+    # the forecast's label is the one in the projection colour; the given
+    # regimen ("450mg q8hr", green) is labelled at the bottom too
+    labels = [a for a in fig.layout.annotations
+              if a.font.color == app_charts.PROJECTION_COLOUR and "q8hr" in a.text]
     assert len(labels) == 1
     assert "525mg q8hr" in labels[0].text                  # the example's candidate
     assert labels[0].yref == "paper" and labels[0].y == 0.0     # bottom of the plot
@@ -120,7 +123,8 @@ def test_forecast_regimen_is_written_at_the_bottom(response):
     assert fig.layout.yaxis.range[1] > 50.0                # room for the label
     off = app_charts.concentration_figure(response, peak_line=50.0,
                                           layers={"forecast": False})
-    assert not [a for a in off.layout.annotations if "q8hr" in a.text]
+    assert not [a for a in off.layout.annotations
+                if a.font.color == app_charts.PROJECTION_COLOUR]
 
 
 def test_current_regimen_is_written_in_green_and_peak_label_sits_below(response):

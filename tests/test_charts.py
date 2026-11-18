@@ -40,4 +40,4 @@ def test_long_history_opens_on_the_last_three_days_and_scrolls():
     assert hi == x([f["time_h"][-1]])[0]
     assert fig.layout.xaxis.rangeslider.visible
     assert fig.layout.dragmode == "pan"
-    assert any(tr.name.startswith("Forecasted") for tr in fig.data)
+    assert any((tr.name or "").startswith("Forecasted") for tr in fig.data)   # bands are unnamed
